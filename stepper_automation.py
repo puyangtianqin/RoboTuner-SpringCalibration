@@ -1,4 +1,4 @@
-# cd Documents
+# cd Documents test
 # python3 stepper_automation.py
 
 from time import sleep
