@@ -5,9 +5,11 @@ import time
 # ------------------------------
 # CONFIGURATION
 # ------------------------------
-CHANNEL = 0                       # Only read channel 0
-CALIBRATION_FACTOR = 100000       # Convert voltage ratio → force
-DATA_RATE = 100                   # Updates per second
+CHANNEL = 0  # Only read channel 0
+# CALIBRATION_FACTOR = 104186.695491727  # Convert voltage ratio → force
+CALIBRATION_FACTOR = 98640.7377186547  # Convert voltage ratio → torque #getting values close to noah's setup
+# CALIBRATION_FACTOR = 104775.208950319 #Manufacturing value - slightly higher than expected on noah's setup -- eg 5.83 vs 5.5 readings
+DATA_RATE = 100  # Updates per second
 # ------------------------------
 
 # Create VoltageRatioInput object
@@ -17,18 +19,23 @@ bridge.setChannel(CHANNEL)
 # ------------------------------
 # Handlers
 # ------------------------------
-tare_offset = None
+OFFSET = None
+
 
 def on_attach(self):
     print(f"Channel {self.getChannel()} attached.")
 
+
 def on_voltage_ratio_change(self, voltageRatio):
-    global tare_offset
-    if tare_offset is None:
-        tare_offset = voltageRatio
-        print(f"Tare complete: {tare_offset:.6f}")
-    force = (voltageRatio - tare_offset) * CALIBRATION_FACTOR
-    print(f"Channel {self.getChannel()}: Voltage Ratio={voltageRatio:.6f} → Force={force:.2f} N")
+    global OFFSET
+    if OFFSET is None:
+        OFFSET = voltageRatio
+        print(f"Zero Captured: {OFFSET:.6f}")
+    force = (voltageRatio - OFFSET) * CALIBRATION_FACTOR
+    print(
+        f"Channel {self.getChannel()}: Voltage Ratio={voltageRatio:.6f} → Torque={force:.2f} Nm"
+    )
+
 
 bridge.setOnAttachHandler(on_attach)
 bridge.setOnVoltageRatioChangeHandler(on_voltage_ratio_change)
@@ -48,7 +55,7 @@ print("Waiting for first valid reading for tare...")
 # ------------------------------
 # WAIT for the first reading
 # ------------------------------
-while tare_offset is None:
+while OFFSET is None:
     time.sleep(0.01)
 
 print("Starting live readings... (press Enter to stop)")
@@ -60,4 +67,3 @@ try:
     input()
 finally:
     bridge.close()
-
