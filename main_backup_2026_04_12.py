@@ -1,8 +1,17 @@
 import math
 import sys
+import time
 from collections import deque
 from time import sleep
+import csv
 
+# MUST ENANBLE ENCODER TO USE DATA LOGGING
+# of allow nans for deflection in line 423
+# Encoder still may need to be converted to other units
+# May need to increase sensor resolution by changing self.sensor_timer.start(100) -> 20 or 10 for higher Hz
+
+
+import RPi.GPIO as GPIO
 from PyQt5.QtCore import QPointF, QTimer, Qt
 from PyQt5.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt5.QtWidgets import (
@@ -23,44 +32,6 @@ try:
     from Phidget22.Devices.VoltageRatioInput import VoltageRatioInput
 except ImportError:
     VoltageRatioInput = None
-
-try:
-    import RPi.GPIO as GPIO
-except ImportError:
-
-    class MockGPIO:
-        BCM = "BCM"
-        OUT = "OUT"
-        IN = "IN"
-        HIGH = 1
-        LOW = 0
-
-        @staticmethod
-        def setmode(mode):
-            pass
-
-        @staticmethod
-        def setwarnings(flag):
-            pass
-
-        @staticmethod
-        def setup(pin, mode):
-            pass
-
-        @staticmethod
-        def output(pin, value):
-            pass
-
-        @staticmethod
-        def input(pin):
-            return 0
-
-        @staticmethod
-        def cleanup():
-            pass
-
-    GPIO = MockGPIO()
-
 
 DIR = 4
 STEP = 23
@@ -87,7 +58,6 @@ ENCODER_STATUS_BITS = 6
 ENCODER_DATA_MASK = 0x3FFFF
 ENCODER_STATUS_MASK = 0x3F
 ENCODER_WAKE_DELAY_S = 0.000005
-
 PLOT_HISTORY = 200
 
 
@@ -177,8 +147,7 @@ class MainWindow(QMainWindow):
         self.encoder_filtered = math.nan
         self.encoder_raw = math.nan
         self.encoder_status = math.nan
-        self.mock_encoder_position = 0
-        self.mock_sensor_phase = 0.0
+        self.logging_enabled = True
         self.torque_history = deque([math.nan], maxlen=PLOT_HISTORY)
         self.encoder_history = deque([math.nan], maxlen=PLOT_HISTORY)
 
@@ -245,6 +214,7 @@ class MainWindow(QMainWindow):
         action_layout.addStretch()
 
         root_layout.addWidget(action_panel, 0)
+
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self.on_tab_changed)
         root_layout.addWidget(self.tabs, 3)
@@ -264,14 +234,21 @@ class MainWindow(QMainWindow):
         self._init_encoder()
         self._init_torque_sensor()
         self._start_sensor_refresh()
+        self.start_time = time.time()
         self._update_emergency_stop_button()
         self._update_step_counter_label()
         self._set_motion_controls_enabled(True)
 
+        self.csv_file = open(
+            f"torque_deflection_{time.strftime('%Y%m%d_%H%M%S')}.csv", "w", newline=""
+        )
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow(["time_s", "torque", "deflection"])
+
     def _build_manual_tab(self):
-        QLabel(
-            "Revolutions (-1 to 1, + is CW)", self.manual_tab
-        ).setGeometry(40, 40, 260, 30)
+        QLabel("Revolutions (-1 to 1, + is CW)", self.manual_tab).setGeometry(
+            40, 40, 260, 30
+        )
 
         self.manual_rev_input = QDoubleSpinBox(self.manual_tab)
         self.manual_rev_input.setRange(-1.0, 1.0)
@@ -284,9 +261,7 @@ class MainWindow(QMainWindow):
         self.manual_actuation_button.clicked.connect(self.run_manual_actuation)
 
     def _build_automation_tab(self):
-        QLabel("Move per step (rev)", self.automation_tab).setGeometry(
-            40, 40, 180, 30
-        )
+        QLabel("Move per step (rev)", self.automation_tab).setGeometry(40, 40, 180, 30)
         self.auto_step_rev_input = QDoubleSpinBox(self.automation_tab)
         self.auto_step_rev_input.setRange(0.01, 1.0)
         self.auto_step_rev_input.setSingleStep(0.05)
@@ -294,9 +269,7 @@ class MainWindow(QMainWindow):
         self.auto_step_rev_input.setValue(0.10)
         self.auto_step_rev_input.setGeometry(40, 75, 120, 35)
 
-        QLabel("Number of points", self.automation_tab).setGeometry(
-            220, 40, 140, 30
-        )
+        QLabel("Number of points", self.automation_tab).setGeometry(220, 40, 140, 30)
         self.auto_point_count_input = QSpinBox(self.automation_tab)
         self.auto_point_count_input.setRange(1, 1000)
         self.auto_point_count_input.setValue(10)
@@ -361,15 +334,28 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def _init_encoder(self):
-        self.encoder_available = True
-        self.encoder_raw = 0.0
-        self.encoder_filtered = 0.0
-        self.encoder_status = 0
-        self.encoder_state_label.setText("State: Simulated")
+        if not ENCODER_ENABLED:
+            self.encoder_state_label.setText("State: Waiting for encoder")
+            return
+
+        try:
+            GPIO.setup(ENCODER_CLK, GPIO.OUT)
+            GPIO.setup(ENCODER_CS, GPIO.OUT)
+            GPIO.setup(ENCODER_MISO, GPIO.IN)
+            GPIO.output(ENCODER_CS, GPIO.HIGH)
+            GPIO.output(ENCODER_CLK, GPIO.HIGH)
+            self.encoder_available = True
+            self.encoder_state_label.setText("State: Live")
+        except Exception:
+            self.encoder_available = False
+            self.encoder_raw = math.nan
+            self.encoder_filtered = math.nan
+            self.encoder_status = math.nan
+            self.encoder_state_label.setText("State: Waiting for encoder")
 
     def _init_torque_sensor(self):
         if VoltageRatioInput is None:
-            self.sensor_state_label.setText("State: Simulated")
+            self.sensor_state_label.setText("State: Waiting for sensor")
             return
 
         try:
@@ -382,9 +368,9 @@ class MainWindow(QMainWindow):
             self.sensor_state_label.setText("State: Waiting for tare")
         except Exception:
             self.bridge = None
-            self.sensor_state_label.setText("State: Simulated")
-            self.latest_voltage_ratio = 0.0
-            self.latest_force = 0.0
+            self.sensor_state_label.setText("State: Waiting for sensor")
+            self.latest_voltage_ratio = math.nan
+            self.latest_force = math.nan
 
     def _start_sensor_refresh(self):
         self.sensor_timer = QTimer(self)
@@ -403,11 +389,6 @@ class MainWindow(QMainWindow):
         self.latest_force = (voltage_ratio - self.tare_offset) * CALIBRATION_FACTOR
 
     def refresh_sensor_labels(self):
-        if self.bridge is None:
-            self.mock_sensor_phase += 0.08
-            self.latest_voltage_ratio = 0.0015 * math.sin(self.mock_sensor_phase)
-            self.latest_force = self.latest_voltage_ratio * CALIBRATION_FACTOR
-
         self.sensor_voltage_label.setText(
             f"Voltage Ratio: {self._format_numeric(self.latest_voltage_ratio, 6)}"
         )
@@ -417,14 +398,13 @@ class MainWindow(QMainWindow):
         self.refresh_encoder_labels()
         self._update_waveforms()
 
-        if self.bridge is None:
-            self.sensor_state_label.setText("State: Simulated")
-        elif math.isnan(self.latest_voltage_ratio):
+        if math.isnan(self.latest_voltage_ratio):
             self.sensor_state_label.setText("State: Waiting for sensor")
         elif self.tare_offset is None:
             self.sensor_state_label.setText("State: Waiting for tare")
         else:
             self.sensor_state_label.setText("State: Live")
+        self.log_data()
 
     def refresh_encoder_labels(self):
         if self.encoder_available:
@@ -455,7 +435,7 @@ class MainWindow(QMainWindow):
         )
 
         if self.encoder_available:
-            self.encoder_state_label.setText("State: Simulated")
+            self.encoder_state_label.setText("State: Live")
         else:
             self.encoder_state_label.setText("State: Waiting for encoder")
 
@@ -466,8 +446,18 @@ class MainWindow(QMainWindow):
         self.encoder_plot.update_samples(self.encoder_history)
 
     def read_encoder_raw(self):
-        mock_data = int(self.mock_encoder_position) & ENCODER_DATA_MASK
-        return (mock_data << ENCODER_STATUS_BITS) | 0
+        raw_val = 0
+        GPIO.output(ENCODER_CS, GPIO.LOW)
+        sleep(ENCODER_WAKE_DELAY_S)
+
+        for _ in range(ENCODER_FRAME_BITS):
+            GPIO.output(ENCODER_CLK, GPIO.LOW)
+            bit = GPIO.input(ENCODER_MISO)
+            raw_val = (raw_val << 1) | bit
+            GPIO.output(ENCODER_CLK, GPIO.HIGH)
+
+        GPIO.output(ENCODER_CS, GPIO.HIGH)
+        return raw_val
 
     def _format_numeric(self, value, decimals):
         if value is None or math.isnan(value):
@@ -532,16 +522,19 @@ class MainWindow(QMainWindow):
         direction_text = "CW" if direction == CW else "CCW"
         self.set_status(f"Stepper State: MOVING {direction_text}")
 
-        raw_val = 0
+        GPIO.output(DIR, direction)
+        sleep(DIR_SETUP_DELAY_S)
+
         for _ in range(pulse_count):
             if self.stop_requested:
                 break
-            raw_val += 1
-            self.mock_encoder_position += 1 if direction == CW else -1
+            GPIO.output(STEP, GPIO.HIGH)
+            sleep(0.5 / frequency_hz)
+            GPIO.output(STEP, GPIO.LOW)
+            sleep(0.5 / frequency_hz)
             self.step_counter += 1 if direction == CW else -1
             if self.step_counter % 50 == 0:
                 self._update_step_counter_label()
-            sleep(0.5 / frequency_hz)
             QApplication.processEvents()
 
         self._update_step_counter_label()
@@ -606,7 +599,6 @@ class MainWindow(QMainWindow):
 
     def reset_step_counter(self):
         self.step_counter = 0
-        self.mock_encoder_position = 0
         self._update_step_counter_label()
 
     def return_to_zero(self):
@@ -636,6 +628,9 @@ class MainWindow(QMainWindow):
             self.active_tab_index = index
 
     def closeEvent(self, event):
+        self.emergency_stop_button.setChecked(False)
+        self.emergency_stop_enabled = False
+        self._update_emergency_stop_button()
         if self.bridge is not None:
             try:
                 self.bridge.close()
@@ -643,6 +638,22 @@ class MainWindow(QMainWindow):
                 pass
         GPIO.cleanup()
         super().closeEvent(event)
+        if hasattr(self, "csv_file"):
+            self.csv_file.close()
+
+    def log_data(self):
+        if not self.logging_enabled:
+            return
+
+        current_time = time.time() - self.start_time
+
+        torque = self.latest_force
+        deflection = self.encoder_filtered
+
+        if math.isnan(torque) or math.isnan(deflection):
+            return
+
+        self.csv_writer.writerow([current_time, torque, deflection])
 
 
 def main():
