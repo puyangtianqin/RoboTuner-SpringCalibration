@@ -1,9 +1,9 @@
 import math
 import sys
 from collections import deque
-from time import sleep
+from time import perf_counter, sleep
 
-from PyQt5.QtCore import QPointF, QTimer, Qt
+from PyQt5.QtCore import QEvent, QPointF, QTimer, Qt
 from PyQt5.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt5.QtWidgets import (
     QApplication,
@@ -11,7 +11,9 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -67,14 +69,38 @@ STEP = 23
 CW = 1
 CCW = 0
 DIR_SETUP_DELAY_S = 0.01
-PULSES_PER_REV = 1600
+BASE_STEPPER_DRIVER_PULSES_PER_REV = 1600
+STEPPER_DRIVER_PULSES_PER_REV = 6400 * 2 * 2
+OPEN_LOOP_RATE_SCALE = (
+    STEPPER_DRIVER_PULSES_PER_REV / BASE_STEPPER_DRIVER_PULSES_PER_REV
+)
+PULSES_PER_REV = STEPPER_DRIVER_PULSES_PER_REV
+STEPPER_OUTPUT_DEG_PER_PULSE = 360.0 / STEPPER_DRIVER_PULSES_PER_REV
 STEP_DELAY_S = 0.005
-RETURN_FREQUENCY_HZ = 50.0
+DEFAULT_ACTUATION_FREQUENCY_HZ = 100.0 * OPEN_LOOP_RATE_SCALE
+RETURN_FREQUENCY_HZ = 50.0 * OPEN_LOOP_RATE_SCALE
+CALIBRATION_START_FREQUENCY_HZ = 1.0 * OPEN_LOOP_RATE_SCALE
+CALIBRATION_MAX_FREQUENCY_HZ = 20.0 * OPEN_LOOP_RATE_SCALE
+CALIBRATION_RAMP_TIME_S = 2.0
+CALIBRATION_TIMER_INTERVAL_MS = 20
 
 TORQUE_CHANNEL = 0
 CALIBRATION_FACTOR = 98640.737718654
 DATA_RATE = 100
 NAN_TEXT = "nan"
+DISPLAY_TORQUE_SCALE = 1000.0
+DEFAULT_TORQUE_LIMIT_MNM = 10000.0
+CLOSED_LOOP_REFERENCE_MAX_OFFSET_MNM = 10000.0
+PID_CONTROL_INTERVAL_MS = 20
+PID_KP = 0.2
+PID_KI = 0.01
+PID_KD = 0.0015
+PID_MAX_STEP_RATE_HZ = 500.0
+PID_INTEGRAL_LIMIT = 50000.0
+PID_ERROR_DEADBAND_MNM = 2.0
+PID_HYSTERESIS_REENTRY_MNM = PID_ERROR_DEADBAND_MNM
+SIMULATED_TORQUE_SLOPE_NM_PER_MOTOR_REV = 40.0
+SIMULATED_TORQUE_TICKS_PER_MNM = 2000.0
 
 ENCODER_ENABLED = False
 ENCODER_CLK = 11
@@ -82,11 +108,22 @@ ENCODER_MISO = 9
 ENCODER_CS = 8
 ENCODER_ALPHA = 0.1
 ENCODER_FRAME_BITS = 24
-ENCODER_DATA_BITS = 18
-ENCODER_STATUS_BITS = 6
-ENCODER_DATA_MASK = 0x3FFFF
-ENCODER_STATUS_MASK = 0x3F
+ENCODER_DATA_BITS = 20
+ENCODER_STATUS_BITS = 4
+ENCODER_DATA_MASK = 0xFFFFF
+ENCODER_STATUS_MASK = 0xF
 ENCODER_WAKE_DELAY_S = 0.000005
+ENCODER_COUNTS_PER_REV = ENCODER_DATA_MASK + 1
+GEAR_REDUCTION_RATIO = 50.0
+SIMULATED_ENCODER_DC_BIAS_TICKS = 300000.0
+SIMULATED_SPRING_STIFFNESS_MNM_PER_OUTPUT_REV = (
+    SIMULATED_TORQUE_SLOPE_NM_PER_MOTOR_REV
+    * DISPLAY_TORQUE_SCALE
+    * GEAR_REDUCTION_RATIO
+    * 1.8
+)
+SIMULATED_SPRING_DAMPING_MNM_PER_OUTPUT_REV_PER_S = 960000.0
+SIMULATED_TRANSIENT_TIME_CONSTANT_S = 0.6
 
 PLOT_HISTORY = 200
 
@@ -95,14 +132,25 @@ class WaveformWidget(QWidget):
     def __init__(self, title, color, parent=None):
         super().__init__(parent)
         self.title = title
+        self.paused = False
         self.samples = deque(maxlen=PLOT_HISTORY)
         self.pen = QPen(QColor(color), 2)
         self.setMinimumHeight(120)
 
     def update_samples(self, samples):
+        if self.paused:
+            return
         self.samples.clear()
         self.samples.extend(samples)
         self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.paused = not self.paused
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -111,7 +159,8 @@ class WaveformWidget(QWidget):
 
         plot_rect = self.rect().adjusted(8, 24, -8, -8)
         painter.setPen(QColor("#666666"))
-        painter.drawText(8, 16, self.title)
+        title = self.title if not self.paused else f"{self.title} (Paused)"
+        painter.drawText(8, 16, title)
 
         painter.setPen(QPen(QColor("#d0d0d0"), 1))
         painter.drawRect(plot_rect)
@@ -166,20 +215,40 @@ class MainWindow(QMainWindow):
         self.stop_requested = False
         self.emergency_stop_enabled = False
         self.step_counter = 0
-        self.actuation_frequency_hz = 1.0 / (2.0 * STEP_DELAY_S)
+        self.actuation_frequency_hz = DEFAULT_ACTUATION_FREQUENCY_HZ
         self.active_tab_index = 0
+        self.closed_loop_lock_active = False
         self.motion_lock_active = False
         self.bridge = None
         self.tare_offset = None
         self.latest_voltage_ratio = math.nan
         self.latest_force = math.nan
+        self.torque_limit_mnm = DEFAULT_TORQUE_LIMIT_MNM
+        self.torque_limit_tripped = False
+        self.torque_limit_dialog_open = False
+        self.closed_loop_reference_warning_open = False
+        self.closed_loop_enabled = False
+        self.meaningful_logging_enabled = False
         self.encoder_available = False
         self.encoder_filtered = math.nan
         self.encoder_raw = math.nan
         self.encoder_status = math.nan
-        self.mock_encoder_position = 0
-        self.mock_sensor_phase = 0.0
+        self.calibration_direction = None
+        self.calibration_hold_start_s = None
+        self.calibration_last_update_s = None
+        self.calibration_step_accumulator = 0.0
+        self.pid_integral = 0.0
+        self.pid_previous_error_mnm = 0.0
+        self.pid_last_update_s = perf_counter()
+        self.pid_step_accumulator = 0.0
+        self.pid_hysteresis_active = False
+        self.simulated_output_angle_rev = 0.0
+        self.simulated_load_angle_rev = 0.0
+        self.simulated_deflection_rev = 0.0
+        self.simulated_transient_torque_mnm = 0.0
+        self.last_simulated_plant_update_s = perf_counter()
         self.torque_history = deque([math.nan], maxlen=PLOT_HISTORY)
+        self.actuation_torque_history = deque([math.nan], maxlen=PLOT_HISTORY)
         self.encoder_history = deque([math.nan], maxlen=PLOT_HISTORY)
 
         GPIO.setmode(GPIO.BCM)
@@ -195,7 +264,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         action_panel = QWidget()
-        action_panel.setFixedWidth(180)
+        action_panel.setFixedWidth(240)
         action_layout = QVBoxLayout(action_panel)
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(8)
@@ -205,26 +274,42 @@ class MainWindow(QMainWindow):
         self.brake_button.clicked.connect(self.request_stop)
         action_layout.addWidget(self.brake_button)
 
-        self.emergency_stop_button = QPushButton("E-Break: F")
+        self.emergency_stop_button = QPushButton("Stepper Disabled")
         self.emergency_stop_button.setFixedHeight(40)
         self.emergency_stop_button.setCheckable(True)
         self.emergency_stop_button.toggled.connect(self.on_emergency_stop_toggled)
         action_layout.addWidget(self.emergency_stop_button)
 
-        self.step_counter_label = QLabel("Step Counter: 0 pulses")
+        self.step_counter_label = QLabel("Step Counter: 0 step")
         self.step_counter_label.setWordWrap(True)
         action_layout.addWidget(self.step_counter_label)
+
+        counter_button_row = QHBoxLayout()
+        counter_button_row.setSpacing(8)
+
+        self.reset_counter_button = QPushButton("Reset Counter")
+        self.reset_counter_button.setFixedHeight(32)
+        self.reset_counter_button.clicked.connect(self.reset_step_counter)
+        counter_button_row.addWidget(self.reset_counter_button)
+
+        self.return_to_zero_button = QPushButton("Return to Zero")
+        self.return_to_zero_button.setFixedHeight(32)
+        self.return_to_zero_button.clicked.connect(self.return_to_zero)
+        counter_button_row.addWidget(self.return_to_zero_button)
+
+        action_layout.addLayout(counter_button_row)
 
         self.stepper_status_label = QLabel("Stepper State: IDLE")
         self.stepper_status_label.setWordWrap(True)
         action_layout.addWidget(self.stepper_status_label)
 
-        speed_label = QLabel("Actuation Freq (Hz)")
+        speed_label = QLabel("Stepper Speed (steps/s)")
         action_layout.addWidget(speed_label)
 
         self.actuation_frequency_input = QDoubleSpinBox()
-        self.actuation_frequency_input.setRange(1.0, 1000.0)
-        self.actuation_frequency_input.setSingleStep(10.0)
+        self.actuation_frequency_input.setFixedWidth(120)
+        self.actuation_frequency_input.setRange(1.0, 10000.0)
+        self.actuation_frequency_input.setSingleStep(50.0)
         self.actuation_frequency_input.setDecimals(1)
         self.actuation_frequency_input.setValue(self.actuation_frequency_hz)
         self.actuation_frequency_input.valueChanged.connect(
@@ -232,22 +317,59 @@ class MainWindow(QMainWindow):
         )
         action_layout.addWidget(self.actuation_frequency_input)
 
-        self.reset_counter_button = QPushButton("Reset Counter")
-        self.reset_counter_button.setFixedHeight(32)
-        self.reset_counter_button.clicked.connect(self.reset_step_counter)
-        action_layout.addWidget(self.reset_counter_button)
+        torque_limit_label = QLabel("Torque Limit (mN-m)")
+        action_layout.addWidget(torque_limit_label)
 
-        self.return_to_zero_button = QPushButton("Return to Zero")
-        self.return_to_zero_button.setFixedHeight(32)
-        self.return_to_zero_button.clicked.connect(self.return_to_zero)
-        action_layout.addWidget(self.return_to_zero_button)
+        self.torque_limit_input = QDoubleSpinBox()
+        self.torque_limit_input.setFixedWidth(120)
+        self.torque_limit_input.setRange(1.0, 1_000_000.0)
+        self.torque_limit_input.setSingleStep(100.0)
+        self.torque_limit_input.setDecimals(1)
+        self.torque_limit_input.setValue(self.torque_limit_mnm)
+        self.torque_limit_input.valueChanged.connect(self.on_torque_limit_changed)
+        action_layout.addWidget(self.torque_limit_input)
+
+        self.meaningful_logging_button = QPushButton("Meaningful Logging: OFF")
+        self.meaningful_logging_button.setFixedHeight(36)
+        self.meaningful_logging_button.setCheckable(True)
+        self.meaningful_logging_button.toggled.connect(
+            self.on_meaningful_logging_toggled
+        )
+        # When this is implemented in main.py, only apply the user-selected
+        # sampling rate while meaningful logging is ON. Otherwise, record
+        # background/history data at 1 Hz.
+        # Also add a separate boolean CSV column so each row indicates whether
+        # it was logged as meaningful/special data or regular history.
+        action_layout.addWidget(self.meaningful_logging_button)
+
+        data_rate_label = QLabel("Data Acquisition Rate (Hz)")
+        action_layout.addWidget(data_rate_label)
+
+        self.data_rate_input = QDoubleSpinBox()
+        self.data_rate_input.setFixedWidth(120)
+        self.data_rate_input.setRange(0.1, 1000.0)
+        self.data_rate_input.setSingleStep(1.0)
+        self.data_rate_input.setDecimals(1)
+        self.data_rate_input.setValue(10.0)
+        action_layout.addWidget(self.data_rate_input)
+
+        serial_number_label = QLabel("Unique Serial Number")
+        action_layout.addWidget(serial_number_label)
+
+        self.serial_number_input = QLineEdit()
+        self.serial_number_input.setFixedWidth(120)
+        self.serial_number_input.setText("RoboTuners_Test")
+        self.serial_number_input.setPlaceholderText("Enter serial number")
+        # Keep this field in the GUI test harness for now. When this UI is moved
+        # into the main file, use the entered serial number to help name the CSV.
+        action_layout.addWidget(self.serial_number_input)
 
         action_layout.addStretch()
 
         root_layout.addWidget(action_panel, 0)
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self.on_tab_changed)
-        root_layout.addWidget(self.tabs, 3)
+        root_layout.addWidget(self.tabs, 2)
 
         self.sensor_panel = QWidget()
         self.sensor_panel.setFixedWidth(240)
@@ -255,16 +377,24 @@ class MainWindow(QMainWindow):
 
         self.manual_tab = QWidget()
         self.automation_tab = QWidget()
+        self.closed_loop_tab = QWidget()
         self.tabs.addTab(self.manual_tab, "Manual Control")
         self.tabs.addTab(self.automation_tab, "Automation")
+        self.tabs.addTab(self.closed_loop_tab, "Closed-Loop Control")
+        self.closed_loop_tab_index = self.tabs.indexOf(self.closed_loop_tab)
+        self.tabs.tabBar().installEventFilter(self)
 
         self._build_manual_tab()
         self._build_automation_tab()
+        self._build_closed_loop_tab()
         self._build_sensor_panel()
         self._init_encoder()
         self._init_torque_sensor()
         self._start_sensor_refresh()
+        self._start_calibration_motion_timer()
+        self._start_closed_loop_timer()
         self._update_emergency_stop_button()
+        self._update_meaningful_logging_button()
         self._update_step_counter_label()
         self._set_motion_controls_enabled(True)
 
@@ -275,22 +405,36 @@ class MainWindow(QMainWindow):
 
         self.manual_rev_input = QDoubleSpinBox(self.manual_tab)
         self.manual_rev_input.setRange(-1.0, 1.0)
-        self.manual_rev_input.setSingleStep(0.1)
-        self.manual_rev_input.setDecimals(2)
+        self.manual_rev_input.setSingleStep(0.01)
+        self.manual_rev_input.setDecimals(3)
         self.manual_rev_input.setGeometry(40, 75, 120, 35)
 
         self.manual_actuation_button = QPushButton("Actuation Cmd", self.manual_tab)
         self.manual_actuation_button.setGeometry(40, 130, 160, 40)
         self.manual_actuation_button.clicked.connect(self.run_manual_actuation)
 
+        self.manual_move_cw_button = QPushButton("Move CW", self.manual_tab)
+        self.manual_move_cw_button.setGeometry(40, 190, 120, 40)
+        self.manual_move_cw_button.pressed.connect(
+            lambda: self.start_manual_calibration_move(CW)
+        )
+        self.manual_move_cw_button.released.connect(self.stop_manual_calibration_move)
+
+        self.manual_move_ccw_button = QPushButton("Move CCW", self.manual_tab)
+        self.manual_move_ccw_button.setGeometry(180, 190, 120, 40)
+        self.manual_move_ccw_button.pressed.connect(
+            lambda: self.start_manual_calibration_move(CCW)
+        )
+        self.manual_move_ccw_button.released.connect(self.stop_manual_calibration_move)
+
     def _build_automation_tab(self):
         QLabel("Move per step (rev)", self.automation_tab).setGeometry(
             40, 40, 180, 30
         )
         self.auto_step_rev_input = QDoubleSpinBox(self.automation_tab)
-        self.auto_step_rev_input.setRange(0.01, 1.0)
-        self.auto_step_rev_input.setSingleStep(0.05)
-        self.auto_step_rev_input.setDecimals(2)
+        self.auto_step_rev_input.setRange(0.001, 1.0)
+        self.auto_step_rev_input.setSingleStep(0.01)
+        self.auto_step_rev_input.setDecimals(3)
         self.auto_step_rev_input.setValue(0.10)
         self.auto_step_rev_input.setGeometry(40, 75, 120, 35)
 
@@ -323,12 +467,54 @@ class MainWindow(QMainWindow):
         self.automation_start_button.setGeometry(40, 220, 180, 40)
         self.automation_start_button.clicked.connect(self.run_automation)
 
+    def _build_closed_loop_tab(self):
+        QLabel("Closed-Loop Torque Control", self.closed_loop_tab).setGeometry(
+            40, 30, 240, 30
+        )
+
+        self.closed_loop_note_label = QLabel(
+            "UI scaffold only for now. Control algorithm will be added later.",
+            self.closed_loop_tab,
+        )
+        self.closed_loop_note_label.setGeometry(40, 60, 360, 24)
+        self.closed_loop_note_label.setStyleSheet("color: #666666;")
+
+        QLabel("Reference Torque (mN-m)", self.closed_loop_tab).setGeometry(
+            40, 105, 180, 30
+        )
+        self.closed_loop_target_input = QDoubleSpinBox(self.closed_loop_tab)
+        self.closed_loop_target_input.setGeometry(40, 140, 140, 35)
+        self.closed_loop_target_input.setRange(-1_000_000.0, 1_000_000.0)
+        self.closed_loop_target_input.setDecimals(2)
+        self.closed_loop_target_input.setSingleStep(100.0)
+        self.closed_loop_target_input.setValue(0.0)
+        self.closed_loop_target_input.editingFinished.connect(
+            self.validate_closed_loop_reference
+        )
+
+        self.closed_loop_toggle_button = QPushButton(
+            "Closed Loop: OFF", self.closed_loop_tab
+        )
+        self.closed_loop_toggle_button.setGeometry(40, 205, 220, 40)
+        self.closed_loop_toggle_button.setCheckable(True)
+        self.closed_loop_toggle_button.setStyleSheet(
+            "background-color: #6b7280; color: white; font-weight: bold;"
+        )
+        self.closed_loop_toggle_button.toggled.connect(
+            self.on_closed_loop_toggled
+        )
+
+        self.closed_loop_status_label = QLabel(
+            "Closed-Loop State: Idle", self.closed_loop_tab
+        )
+        self.closed_loop_status_label.setGeometry(40, 265, 220, 24)
+
     def _build_sensor_panel(self):
         layout = QVBoxLayout(self.sensor_panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        title = QLabel("Sensor Readout")
+        title = QLabel("Torque Sensor Readout")
         layout.addWidget(title)
 
         self.sensor_state_label = QLabel("State: Waiting for sensor")
@@ -337,8 +523,10 @@ class MainWindow(QMainWindow):
         self.sensor_voltage_label = QLabel("Voltage Ratio: nan")
         layout.addWidget(self.sensor_voltage_label)
 
-        self.sensor_force_label = QLabel("Force: nan")
-        layout.addWidget(self.sensor_force_label)
+        self.sensor_torque_label = QLabel("Torque: nan mN-m")
+        layout.addWidget(self.sensor_torque_label)
+
+        layout.addSpacing(12)
 
         encoder_title = QLabel("Spring Deflection Encoder")
         layout.addWidget(encoder_title)
@@ -352,8 +540,16 @@ class MainWindow(QMainWindow):
         self.encoder_filtered_label = QLabel("Filtered: nan")
         layout.addWidget(self.encoder_filtered_label)
 
+        self.encoder_angle_label = QLabel("Angular Displacement: nan deg")
+        layout.addWidget(self.encoder_angle_label)
+
         self.torque_plot = WaveformWidget("Torque Waveform", "#c1121f")
         layout.addWidget(self.torque_plot)
+
+        self.actuation_torque_plot = WaveformWidget(
+            "Torque Waveform (Last Actuation)", "#9c6644"
+        )
+        layout.addWidget(self.actuation_torque_plot)
 
         self.encoder_plot = WaveformWidget("Encoder Waveform", "#1d3557")
         layout.addWidget(self.encoder_plot)
@@ -362,8 +558,12 @@ class MainWindow(QMainWindow):
 
     def _init_encoder(self):
         self.encoder_available = True
-        self.encoder_raw = 0.0
-        self.encoder_filtered = 0.0
+        self.simulated_output_angle_rev = 0.0
+        self.simulated_load_angle_rev = 0.0
+        self.simulated_deflection_rev = 0.0
+        self.simulated_transient_torque_mnm = 0.0
+        self.encoder_raw = SIMULATED_ENCODER_DC_BIAS_TICKS
+        self.encoder_filtered = SIMULATED_ENCODER_DC_BIAS_TICKS
         self.encoder_status = 0
         self.encoder_state_label.setText("State: Simulated")
 
@@ -385,11 +585,35 @@ class MainWindow(QMainWindow):
             self.sensor_state_label.setText("State: Simulated")
             self.latest_voltage_ratio = 0.0
             self.latest_force = 0.0
+            self.last_simulated_plant_update_s = perf_counter()
 
     def _start_sensor_refresh(self):
         self.sensor_timer = QTimer(self)
         self.sensor_timer.timeout.connect(self.refresh_sensor_labels)
         self.sensor_timer.start(100)
+
+    def eventFilter(self, source, event):
+        if (
+            source == self.tabs.tabBar()
+            and event.type() == QEvent.MouseButtonPress
+            and self.closed_loop_lock_active
+        ):
+            tab_index = self.tabs.tabBar().tabAt(event.pos())
+            if tab_index != -1 and tab_index != self.closed_loop_tab_index:
+                self._show_closed_loop_tab_warning()
+                event.accept()
+                return True
+        return super().eventFilter(source, event)
+
+    def _start_calibration_motion_timer(self):
+        self.calibration_timer = QTimer(self)
+        self.calibration_timer.timeout.connect(self._process_calibration_motion)
+        self.calibration_timer.start(CALIBRATION_TIMER_INTERVAL_MS)
+
+    def _start_closed_loop_timer(self):
+        self.closed_loop_timer = QTimer(self)
+        self.closed_loop_timer.timeout.connect(self._process_closed_loop_control)
+        self.closed_loop_timer.start(PID_CONTROL_INTERVAL_MS)
 
     def on_sensor_attach(self, sensor):
         self.sensor_state_label.setText(
@@ -404,16 +628,16 @@ class MainWindow(QMainWindow):
 
     def refresh_sensor_labels(self):
         if self.bridge is None:
-            self.mock_sensor_phase += 0.08
-            self.latest_voltage_ratio = 0.0015 * math.sin(self.mock_sensor_phase)
-            self.latest_force = self.latest_voltage_ratio * CALIBRATION_FACTOR
+            self._update_simulated_plant()
 
         self.sensor_voltage_label.setText(
             f"Voltage Ratio: {self._format_numeric(self.latest_voltage_ratio, 6)}"
         )
-        self.sensor_force_label.setText(
-            f"Force: {self._format_numeric(self.latest_force, 2)}"
+        displayed_torque = self.latest_force * DISPLAY_TORQUE_SCALE
+        self.sensor_torque_label.setText(
+            f"Torque: {self._format_numeric(displayed_torque, 2)} mN-m"
         )
+        self._check_torque_limit(displayed_torque)
         self.refresh_encoder_labels()
         self._update_waveforms()
 
@@ -427,20 +651,18 @@ class MainWindow(QMainWindow):
             self.sensor_state_label.setText("State: Live")
 
     def refresh_encoder_labels(self):
-        if self.encoder_available:
+        if self.bridge is None:
+            raw_data = self._calculate_simulated_encoder_ticks()
+            self.encoder_status = 0
+            self.encoder_raw = raw_data
+            self.encoder_filtered = float(raw_data)
+        elif self.encoder_available:
             try:
                 full_reading = self.read_encoder_raw()
                 raw_data = (full_reading >> ENCODER_STATUS_BITS) & ENCODER_DATA_MASK
                 self.encoder_status = full_reading & ENCODER_STATUS_MASK
                 self.encoder_raw = raw_data
-
-                if math.isnan(self.encoder_filtered):
-                    self.encoder_filtered = float(raw_data)
-                else:
-                    self.encoder_filtered = (
-                        ENCODER_ALPHA * raw_data
-                        + (1.0 - ENCODER_ALPHA) * self.encoder_filtered
-                    )
+                self.encoder_filtered = float(raw_data)
             except Exception:
                 self.encoder_available = False
                 self.encoder_raw = math.nan
@@ -453,26 +675,215 @@ class MainWindow(QMainWindow):
         self.encoder_filtered_label.setText(
             f"Filtered: {self._format_numeric(self.encoder_filtered, 0)}"
         )
+        self.encoder_angle_label.setText(
+            "Angular Displacement: "
+            f"{self._format_numeric(self._calculate_output_angle_deg(), 2)} deg"
+        )
 
-        if self.encoder_available:
+        if self.bridge is None:
             self.encoder_state_label.setText("State: Simulated")
+        elif self.encoder_available:
+            self.encoder_state_label.setText("State: Live")
         else:
             self.encoder_state_label.setText("State: Waiting for encoder")
 
     def _update_waveforms(self):
-        self.torque_history.append(self.latest_force)
+        displayed_torque = self.latest_force * DISPLAY_TORQUE_SCALE
+        self.torque_history.append(displayed_torque)
+        self.actuation_torque_history.append(displayed_torque)
         self.encoder_history.append(self.encoder_filtered)
         self.torque_plot.update_samples(self.torque_history)
+        self.actuation_torque_plot.update_samples(self.actuation_torque_history)
         self.encoder_plot.update_samples(self.encoder_history)
 
+    def _reset_actuation_torque_history(self):
+        self.actuation_torque_history.clear()
+        self.actuation_torque_history.append(math.nan)
+        self.actuation_torque_plot.update_samples(self.actuation_torque_history)
+
     def read_encoder_raw(self):
-        mock_data = int(self.mock_encoder_position) & ENCODER_DATA_MASK
-        return (mock_data << ENCODER_STATUS_BITS) | 0
+        # The simulator bypasses this path and injects spring-deflection encoder
+        # ticks directly. Keep a packed fallback frame here for non-simulated
+        # code paths in this GUI harness.
+        raw_data = self.encoder_raw
+        if raw_data is None or math.isnan(raw_data):
+            raw_data = SIMULATED_ENCODER_DC_BIAS_TICKS
+        return (int(round(raw_data)) & ENCODER_DATA_MASK) << ENCODER_STATUS_BITS
 
     def _format_numeric(self, value, decimals):
         if value is None or math.isnan(value):
             return NAN_TEXT
         return f"{value:.{decimals}f}"
+
+    def _calculate_output_angle_deg(self):
+        if math.isnan(self.encoder_filtered):
+            return math.nan
+        encoder_motion_ticks = self.encoder_filtered - SIMULATED_ENCODER_DC_BIAS_TICKS
+        return (encoder_motion_ticks / ENCODER_COUNTS_PER_REV) * 360.0
+
+    def _update_simulated_plant(self):
+        current_time_s = perf_counter()
+        delta_s = current_time_s - self.last_simulated_plant_update_s
+        self.last_simulated_plant_update_s = current_time_s
+        if delta_s <= 0.0:
+            return
+
+        previous_output_angle_rev = self.simulated_output_angle_rev
+        motor_angle_rev = self.step_counter / STEPPER_DRIVER_PULSES_PER_REV
+        self.simulated_output_angle_rev = motor_angle_rev / GEAR_REDUCTION_RATIO
+        output_velocity_rev_s = (
+            self.simulated_output_angle_rev - previous_output_angle_rev
+        ) / delta_s
+
+        # Use a fixed load angle for now, so output angle directly creates spring
+        # deflection and torque through the spring-damper relation.
+        self.simulated_deflection_rev = (
+            self.simulated_output_angle_rev - self.simulated_load_angle_rev
+        )
+        static_torque_mnm = (
+            SIMULATED_SPRING_STIFFNESS_MNM_PER_OUTPUT_REV
+            * self.simulated_deflection_rev
+        )
+        transient_target_mnm = (
+            SIMULATED_SPRING_DAMPING_MNM_PER_OUTPUT_REV_PER_S * output_velocity_rev_s
+        )
+        transient_blend = 1.0 - math.exp(
+            -delta_s / SIMULATED_TRANSIENT_TIME_CONSTANT_S
+        )
+        self.simulated_transient_torque_mnm += (
+            transient_target_mnm - self.simulated_transient_torque_mnm
+        ) * transient_blend
+        torque_mnm = static_torque_mnm + self.simulated_transient_torque_mnm
+        torque_ticks = round(torque_mnm * SIMULATED_TORQUE_TICKS_PER_MNM)
+        quantized_torque_mnm = torque_ticks / SIMULATED_TORQUE_TICKS_PER_MNM
+        self.latest_force = quantized_torque_mnm / DISPLAY_TORQUE_SCALE
+        self.latest_voltage_ratio = self.latest_force / CALIBRATION_FACTOR
+
+    def _calculate_simulated_encoder_ticks(self):
+        encoder_motion_ticks = self.simulated_deflection_rev * ENCODER_COUNTS_PER_REV
+        return SIMULATED_ENCODER_DC_BIAS_TICKS + encoder_motion_ticks
+
+    def _reset_pid_state(self):
+        self.pid_integral = 0.0
+        self.pid_previous_error_mnm = 0.0
+        self.pid_last_update_s = perf_counter()
+        self.pid_step_accumulator = 0.0
+        self.pid_hysteresis_active = False
+
+    def _process_closed_loop_control(self):
+        if not self.closed_loop_enabled:
+            return
+
+        if not self.emergency_stop_enabled or self.torque_limit_tripped:
+            self.closed_loop_toggle_button.setChecked(False)
+            return
+
+        current_torque_mnm = self.latest_force * DISPLAY_TORQUE_SCALE
+        if math.isnan(current_torque_mnm):
+            return
+
+        current_time_s = perf_counter()
+        delta_s = current_time_s - self.pid_last_update_s
+        self.pid_last_update_s = current_time_s
+        if delta_s <= 0.0:
+            return
+
+        target_torque_mnm = self.closed_loop_target_input.value()
+        error_mnm = target_torque_mnm - current_torque_mnm
+
+        if not self.pid_hysteresis_active:
+            if abs(error_mnm) <= PID_HYSTERESIS_REENTRY_MNM:
+                error_mnm = 0.0
+            else:
+                self.pid_hysteresis_active = True
+        elif abs(error_mnm) <= PID_ERROR_DEADBAND_MNM:
+            self.pid_hysteresis_active = False
+            error_mnm = 0.0
+
+        self.pid_integral += error_mnm * delta_s
+        if error_mnm == 0.0:
+            self.pid_integral = 0.0
+        self.pid_integral = max(
+            min(self.pid_integral, PID_INTEGRAL_LIMIT), -PID_INTEGRAL_LIMIT
+        )
+
+        error_derivative = (error_mnm - self.pid_previous_error_mnm) / delta_s
+        self.pid_previous_error_mnm = error_mnm
+
+        commanded_rate_hz = (
+            PID_KP * error_mnm
+            + PID_KI * self.pid_integral
+            + PID_KD * error_derivative
+        )
+        commanded_rate_hz = max(
+            min(commanded_rate_hz, PID_MAX_STEP_RATE_HZ), -PID_MAX_STEP_RATE_HZ
+        )
+
+        self.pid_step_accumulator += commanded_rate_hz * delta_s
+        pulse_count = int(abs(self.pid_step_accumulator))
+        if pulse_count <= 0:
+            self.closed_loop_status_label.setText(
+                f"Closed-Loop State: Holding ({current_torque_mnm:.1f} mN-m)"
+            )
+            return
+
+        direction = CW if self.pid_step_accumulator > 0 else CCW
+        self.pid_step_accumulator -= math.copysign(pulse_count, self.pid_step_accumulator)
+        self.step_counter += pulse_count if direction == CW else -pulse_count
+        self._update_step_counter_label()
+        direction_text = "CW" if direction == CW else "CCW"
+        self.set_status(f"Stepper State: PID {direction_text}")
+        self.closed_loop_status_label.setText(
+            f"Closed-Loop State: Active ({current_torque_mnm:.1f} mN-m)"
+        )
+
+    def start_manual_calibration_move(self, direction):
+        if not self.emergency_stop_enabled:
+            self.set_status("Stepper State: DISABLED (E-Break: F)")
+            return
+
+        self.calibration_direction = direction
+        self.calibration_hold_start_s = perf_counter()
+        self.calibration_last_update_s = self.calibration_hold_start_s
+        self.calibration_step_accumulator = 0.0
+        self.stop_requested = False
+        direction_text = "CW" if direction == CW else "CCW"
+        self.set_status(f"Stepper State: CALIBRATING {direction_text}")
+        self._reset_actuation_torque_history()
+
+    def stop_manual_calibration_move(self):
+        if self.calibration_direction is None:
+            return
+
+        self.calibration_direction = None
+        self.calibration_hold_start_s = None
+        self.calibration_last_update_s = None
+        self.calibration_step_accumulator = 0.0
+        if not self.torque_limit_tripped:
+            self.set_status("Stepper State: IDLE")
+
+    def _process_calibration_motion(self):
+        if self.calibration_direction is None or not self.emergency_stop_enabled:
+            return
+
+        current_time_s = perf_counter()
+        elapsed_hold_s = current_time_s - self.calibration_hold_start_s
+        delta_s = current_time_s - self.calibration_last_update_s
+        self.calibration_last_update_s = current_time_s
+
+        ramp_fraction = min(max(elapsed_hold_s / CALIBRATION_RAMP_TIME_S, 0.0), 1.0)
+        frequency_hz = CALIBRATION_START_FREQUENCY_HZ + ramp_fraction * (
+            CALIBRATION_MAX_FREQUENCY_HZ - CALIBRATION_START_FREQUENCY_HZ
+        )
+        self.calibration_step_accumulator += frequency_hz * delta_s
+        pulse_count = int(self.calibration_step_accumulator)
+        self.calibration_step_accumulator -= pulse_count
+
+        if pulse_count <= 0:
+            return
+
+        self.step_counter += (1 if self.calibration_direction == CW else -1) * pulse_count
+        self._update_step_counter_label()
 
     def run_manual_actuation(self):
         if not self.emergency_stop_enabled:
@@ -520,7 +931,8 @@ class MainWindow(QMainWindow):
                 if point_index < point_count - 1:
                     self.wait_with_stop(pause_seconds)
         finally:
-            self.set_status("Stepper State: IDLE")
+            if not self.torque_limit_tripped:
+                self.set_status("Stepper State: IDLE")
             self._set_motion_controls_enabled(True)
 
     def move_stepper(self, direction, pulse_count, frequency_hz):
@@ -531,13 +943,13 @@ class MainWindow(QMainWindow):
 
         direction_text = "CW" if direction == CW else "CCW"
         self.set_status(f"Stepper State: MOVING {direction_text}")
+        self._reset_actuation_torque_history()
 
         raw_val = 0
         for _ in range(pulse_count):
             if self.stop_requested:
                 break
             raw_val += 1
-            self.mock_encoder_position += 1 if direction == CW else -1
             self.step_counter += 1 if direction == CW else -1
             if self.step_counter % 50 == 0:
                 self._update_step_counter_label()
@@ -546,7 +958,7 @@ class MainWindow(QMainWindow):
 
         self._update_step_counter_label()
 
-        if not self.stop_requested:
+        if not self.stop_requested and not self.torque_limit_tripped:
             self.set_status("Stepper State: IDLE")
 
     def wait_with_stop(self, seconds):
@@ -567,10 +979,15 @@ class MainWindow(QMainWindow):
         for widget in (
             self.tabs,
             self.actuation_frequency_input,
+            self.torque_limit_input,
+            self.data_rate_input,
+            self.meaningful_logging_button,
             self.reset_counter_button,
             self.return_to_zero_button,
             self.manual_rev_input,
             self.manual_actuation_button,
+            self.manual_move_cw_button,
+            self.manual_move_ccw_button,
             self.auto_step_rev_input,
             self.auto_point_count_input,
             self.auto_pause_input,
@@ -582,31 +999,163 @@ class MainWindow(QMainWindow):
     def on_actuation_frequency_changed(self, value_hz):
         self.actuation_frequency_hz = value_hz
 
+    def on_torque_limit_changed(self, value_mnm):
+        self.torque_limit_mnm = value_mnm
+        if self.torque_limit_tripped:
+            current_torque = self.latest_force * DISPLAY_TORQUE_SCALE
+            if math.isnan(current_torque) or abs(current_torque) < self.torque_limit_mnm:
+                self.torque_limit_tripped = False
+
+    def on_closed_loop_toggled(self, checked):
+        self.closed_loop_lock_active = checked
+        self.closed_loop_enabled = checked
+        if checked:
+            self.validate_closed_loop_reference()
+            self.stop_manual_calibration_move()
+            self._reset_pid_state()
+            self.closed_loop_toggle_button.setText("Closed Loop: ON")
+            self.closed_loop_toggle_button.setStyleSheet(
+                "background-color: #2a9d46; color: white; font-weight: bold;"
+            )
+            self.closed_loop_status_label.setText("Closed-Loop State: Hold Torque Active")
+            self.tabs.setCurrentIndex(self.closed_loop_tab_index)
+        else:
+            self._reset_pid_state()
+            self.closed_loop_toggle_button.setText("Closed Loop: OFF")
+            self.closed_loop_toggle_button.setStyleSheet(
+                "background-color: #6b7280; color: white; font-weight: bold;"
+            )
+            self.closed_loop_status_label.setText("Closed-Loop State: Idle")
+            if not self.torque_limit_tripped:
+                self.set_status("Stepper State: IDLE")
+
+    def _show_closed_loop_tab_warning(self):
+        QMessageBox.warning(
+            self,
+            "Closed-Loop Active",
+            "Closed-loop hold torque is active. Turn it off before using the other tabs.",
+        )
+
+    def validate_closed_loop_reference(self):
+        current_torque_mnm = self.latest_force * DISPLAY_TORQUE_SCALE
+        if math.isnan(current_torque_mnm):
+            return
+
+        requested_torque_mnm = self.closed_loop_target_input.value()
+        if (
+            abs(requested_torque_mnm - current_torque_mnm)
+            <= CLOSED_LOOP_REFERENCE_MAX_OFFSET_MNM
+        ):
+            return
+
+        self.closed_loop_target_input.blockSignals(True)
+        self.closed_loop_target_input.setValue(current_torque_mnm)
+        self.closed_loop_target_input.blockSignals(False)
+
+        if self.closed_loop_reference_warning_open:
+            return
+
+        self.closed_loop_reference_warning_open = True
+        QMessageBox.warning(
+            self,
+            "Reference Torque Rejected",
+            (
+                "Reference torque must stay within +/-10 Nm of the current "
+                "torque reading. The entry was reset to the current torque."
+            ),
+        )
+        self.closed_loop_reference_warning_open = False
+
+    def on_meaningful_logging_toggled(self, checked):
+        self.meaningful_logging_enabled = checked
+        self._update_meaningful_logging_button()
+
+    def _check_torque_limit(self, torque_mnm):
+        if math.isnan(torque_mnm) or self.torque_limit_tripped:
+            return
+
+        if abs(torque_mnm) >= self.torque_limit_mnm:
+            self._trip_torque_limit(torque_mnm)
+
+    def _trip_torque_limit(self, torque_mnm):
+        self.torque_limit_tripped = True
+        self.stop_requested = True
+        self.set_status("Stepper State: TORQUE LIMIT REACHED")
+
+        if self.emergency_stop_button.isChecked():
+            self.emergency_stop_button.setChecked(False)
+        else:
+            self.emergency_stop_enabled = False
+            self._update_emergency_stop_button()
+
+        if self.torque_limit_dialog_open:
+            return
+
+        self.torque_limit_dialog_open = True
+        QMessageBox.warning(
+            self,
+            "Torque Limit Reached",
+            (
+                f"Measured torque reached {torque_mnm:.2f} mN-m, "
+                f"which exceeds the limit of {self.torque_limit_mnm:.2f} mN-m.\n\n"
+                "The stepper has been disabled."
+            ),
+        )
+        self.torque_limit_dialog_open = False
+
     def request_stop(self):
         self.stop_requested = True
-        self.set_status("Stepper State: IDLE")
+        self.stop_manual_calibration_move()
+        if self.closed_loop_enabled:
+            self.closed_loop_toggle_button.setChecked(False)
+        if not self.torque_limit_tripped:
+            self.set_status("Stepper State: IDLE")
 
     def on_emergency_stop_toggled(self, checked):
         self.emergency_stop_enabled = checked
         if not checked:
             self.request_stop()
+        elif self.torque_limit_tripped:
+            self.torque_limit_tripped = False
+        if not checked and self.closed_loop_enabled:
+            self.closed_loop_toggle_button.setChecked(False)
         self._update_emergency_stop_button()
 
     def _update_emergency_stop_button(self):
         if self.emergency_stop_enabled:
-            self.emergency_stop_button.setText("E-Break: T")
+            self.emergency_stop_button.setText("Stepper Enabled")
             self.emergency_stop_button.setStyleSheet(
-                "background-color: #d62828; color: white; font-weight: bold;"
+                "background-color: #2a9d46; color: white; font-weight: bold;"
             )
         else:
-            self.emergency_stop_button.setText("E-Break: F")
+            self.emergency_stop_button.setText("Stepper Disabled")
             self.emergency_stop_button.setStyleSheet(
                 "background-color: #7f1d1d; color: white; font-weight: bold;"
             )
 
+    def _update_meaningful_logging_button(self):
+        if self.meaningful_logging_enabled:
+            self.meaningful_logging_button.setText("Meaningful Logging: ON")
+            self.meaningful_logging_button.setStyleSheet(
+                "background-color: #2a9d46; color: white; font-weight: bold;"
+            )
+        else:
+            self.meaningful_logging_button.setText("Meaningful Logging: OFF")
+            self.meaningful_logging_button.setStyleSheet(
+                "background-color: #6b7280; color: white; font-weight: bold;"
+            )
+
     def reset_step_counter(self):
         self.step_counter = 0
-        self.mock_encoder_position = 0
+        self.simulated_output_angle_rev = 0.0
+        self.simulated_load_angle_rev = 0.0
+        self.simulated_deflection_rev = 0.0
+        self.simulated_transient_torque_mnm = 0.0
+        self.latest_force = 0.0
+        self.latest_voltage_ratio = 0.0
+        self.last_simulated_plant_update_s = perf_counter()
+        self.encoder_raw = SIMULATED_ENCODER_DC_BIAS_TICKS
+        self.encoder_filtered = SIMULATED_ENCODER_DC_BIAS_TICKS
         self._update_step_counter_label()
 
     def return_to_zero(self):
@@ -628,14 +1177,26 @@ class MainWindow(QMainWindow):
             self._set_motion_controls_enabled(True)
 
     def _update_step_counter_label(self):
-        self.step_counter_label.setText(f"Step Counter: {self.step_counter} pulses")
+        self.step_counter_label.setText(f"Step Counter: {self.step_counter} step")
 
     def on_tab_changed(self, index):
+        if self.closed_loop_lock_active and index != self.closed_loop_tab_index:
+            self.tabs.blockSignals(True)
+            self.tabs.setCurrentIndex(self.closed_loop_tab_index)
+            self.tabs.blockSignals(False)
+            self._show_closed_loop_tab_warning()
+            return
+
+        if self.closed_loop_enabled and index == self.closed_loop_tab_index:
+            self.active_tab_index = index
+            return
+
         if index != self.active_tab_index:
             self.request_stop()
             self.active_tab_index = index
 
     def closeEvent(self, event):
+        self.stop_manual_calibration_move()
         if self.bridge is not None:
             try:
                 self.bridge.close()
