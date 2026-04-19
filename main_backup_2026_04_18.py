@@ -1002,7 +1002,10 @@ class MainWindow(QMainWindow):
         pulse_count = int(abs(self.pid_step_accumulator))
         if pulse_count <= 0:
             self.closed_loop_status_label.setText(
-                f"Closed-Loop State: Holding ({current_torque_mnm:.1f} mN-m)"
+                "Closed-Loop State: Holding "
+                f"({current_torque_mnm:.1f} mN-m, "
+                f"error {error_mnm:.1f} mN-m, "
+                f"rate {commanded_rate_hz:.1f} step/s)"
             )
             self._process_closed_loop_automation(current_time_s)
             return
@@ -1376,6 +1379,7 @@ class MainWindow(QMainWindow):
         self.closed_loop_lock_active = enabled
         self.closed_loop_enabled = enabled
         if enabled:
+            self.stop_requested = False
             self.validate_closed_loop_reference()
             self.stop_manual_calibration_move()
             self._reset_pid_state()
