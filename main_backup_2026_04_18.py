@@ -95,14 +95,14 @@ DISPLAY_TORQUE_SCALE = 1000.0
 DEFAULT_TORQUE_LIMIT_MNM = 10000.0
 CLOSED_LOOP_REFERENCE_MAX_OFFSET_MNM = 10000.0
 PID_CONTROL_INTERVAL_MS = 20
-PID_KP = 0.2
-PID_KI = 0.01
-PID_KD = 0.0015
-PID_MAX_STEP_RATE_HZ = 500.0
+PID_KP = 0.05
+PID_KI = 0.0
+PID_KD = 0.0005
+PID_MAX_STEP_RATE_HZ = 150.0
 PID_PULSE_OUTPUT_FREQUENCY_HZ = 500.0
-PID_MAX_PULSES_PER_TICK = 4
-PID_INTEGRAL_LIMIT = 50000.0
-PID_ERROR_DEADBAND_MNM = 2.0
+PID_MAX_PULSES_PER_TICK = 2
+PID_INTEGRAL_LIMIT = 10000.0
+PID_ERROR_DEADBAND_MNM = 10.0
 PID_HYSTERESIS_REENTRY_MNM = PID_ERROR_DEADBAND_MNM
 SIMULATED_TORQUE_SLOPE_NM_PER_MOTOR_REV = 40.0
 SIMULATED_TORQUE_TICKS_PER_MNM = 2000.0
@@ -298,7 +298,7 @@ class MainWindow(QMainWindow):
         self.calibration_last_update_s = None
         self.calibration_step_accumulator = 0.0
         self.pid_integral = 0.0
-        self.pid_previous_error_mnm = 0.0
+        self.pid_previous_torque_mnm = math.nan
         self.pid_last_update_s = perf_counter()
         self.pid_step_accumulator = 0.0
         self.pid_hysteresis_active = False
@@ -951,7 +951,7 @@ class MainWindow(QMainWindow):
 
     def _reset_pid_state(self):
         self.pid_integral = 0.0
-        self.pid_previous_error_mnm = 0.0
+        self.pid_previous_torque_mnm = math.nan
         self.pid_last_update_s = perf_counter()
         self.pid_step_accumulator = 0.0
         self.pid_hysteresis_active = False
@@ -997,13 +997,18 @@ class MainWindow(QMainWindow):
             min(self.pid_integral, PID_INTEGRAL_LIMIT), -PID_INTEGRAL_LIMIT
         )
 
-        error_derivative = (error_mnm - self.pid_previous_error_mnm) / delta_s
-        self.pid_previous_error_mnm = error_mnm
+        if math.isnan(self.pid_previous_torque_mnm):
+            torque_derivative_mnm_s = 0.0
+        else:
+            torque_derivative_mnm_s = (
+                current_torque_mnm - self.pid_previous_torque_mnm
+            ) / delta_s
+        self.pid_previous_torque_mnm = current_torque_mnm
 
         commanded_rate_hz = (
             PID_KP * error_mnm
             + PID_KI * self.pid_integral
-            + PID_KD * error_derivative
+            - PID_KD * torque_derivative_mnm_s
         )
         commanded_rate_hz = max(
             min(commanded_rate_hz, PID_MAX_STEP_RATE_HZ), -PID_MAX_STEP_RATE_HZ
