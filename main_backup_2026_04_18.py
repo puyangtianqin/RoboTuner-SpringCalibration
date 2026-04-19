@@ -102,16 +102,16 @@ PID_HYSTERESIS_REENTRY_MNM = PID_ERROR_DEADBAND_MNM
 SIMULATED_TORQUE_SLOPE_NM_PER_MOTOR_REV = 40.0
 SIMULATED_TORQUE_TICKS_PER_MNM = 2000.0
 
-ENCODER_ENABLED = False
+ENCODER_ENABLED = True
 ENCODER_CLK = 11
 ENCODER_MISO = 9
 ENCODER_CS = 8
 ENCODER_ALPHA = 0.1
 ENCODER_FRAME_BITS = 24
-ENCODER_DATA_BITS = 20
-ENCODER_STATUS_BITS = 4
-ENCODER_DATA_MASK = 0xFFFFF
-ENCODER_STATUS_MASK = 0xF
+ENCODER_DATA_BITS = 18
+ENCODER_STATUS_BITS = 6
+ENCODER_DATA_MASK = 0x3FFFF
+ENCODER_STATUS_MASK = 0x3F
 ENCODER_WAKE_DELAY_S = 0.000005
 ENCODER_COUNTS_PER_REV = ENCODER_DATA_MASK + 1
 GEAR_REDUCTION_RATIO = 50.0
@@ -281,6 +281,7 @@ class MainWindow(QMainWindow):
         self.encoder_available = False
         self.encoder_filtered = math.nan
         self.encoder_raw = math.nan
+        self.encoder_zero_raw = math.nan
         self.encoder_status = math.nan
         self.calibration_direction = None
         self.calibration_hold_start_s = None
@@ -684,15 +685,25 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def _init_encoder(self):
-        self.encoder_available = True
-        self.simulated_output_angle_rev = 0.0
-        self.simulated_load_angle_rev = 0.0
-        self.simulated_deflection_rev = 0.0
-        self.simulated_transient_torque_mnm = 0.0
-        self.encoder_raw = SIMULATED_ENCODER_DC_BIAS_TICKS
-        self.encoder_filtered = SIMULATED_ENCODER_DC_BIAS_TICKS
-        self.encoder_status = 0
-        self.encoder_state_label.setText("State: Simulated")
+        if not ENCODER_ENABLED:
+            self.encoder_state_label.setText("State: Waiting for encoder")
+            return
+
+        try:
+            GPIO.setup(ENCODER_CLK, GPIO.OUT)
+            GPIO.setup(ENCODER_CS, GPIO.OUT)
+            GPIO.setup(ENCODER_MISO, GPIO.IN)
+            GPIO.output(ENCODER_CS, GPIO.HIGH)
+            GPIO.output(ENCODER_CLK, GPIO.HIGH)
+            self.encoder_available = True
+            self.encoder_state_label.setText("State: Live")
+        except Exception:
+            self.encoder_available = False
+            self.encoder_raw = math.nan
+            self.encoder_filtered = math.nan
+            self.encoder_zero_raw = math.nan
+            self.encoder_status = math.nan
+            self.encoder_state_label.setText("State: Waiting for encoder")
 
     def _init_torque_sensor(self):
         if VoltageRatioInput is None:
@@ -781,22 +792,26 @@ class MainWindow(QMainWindow):
             self.sensor_state_label.setText("State: Live")
 
     def refresh_encoder_labels(self):
-        if self.bridge is None:
-            raw_data = self._calculate_simulated_encoder_ticks()
-            self.encoder_status = 0
-            self.encoder_raw = raw_data
-            self.encoder_filtered = float(raw_data)
-        elif self.encoder_available:
+        if self.encoder_available:
             try:
                 full_reading = self.read_encoder_raw()
                 raw_data = (full_reading >> ENCODER_STATUS_BITS) & ENCODER_DATA_MASK
                 self.encoder_status = full_reading & ENCODER_STATUS_MASK
                 self.encoder_raw = raw_data
-                self.encoder_filtered = float(raw_data)
+                if math.isnan(self.encoder_zero_raw):
+                    self.encoder_zero_raw = float(raw_data)
+                if math.isnan(self.encoder_filtered):
+                    self.encoder_filtered = float(raw_data)
+                else:
+                    self.encoder_filtered = (
+                        ENCODER_ALPHA * raw_data
+                        + (1.0 - ENCODER_ALPHA) * self.encoder_filtered
+                    )
             except Exception:
                 self.encoder_available = False
                 self.encoder_raw = math.nan
                 self.encoder_filtered = math.nan
+                self.encoder_zero_raw = math.nan
                 self.encoder_status = math.nan
 
         self.encoder_raw_label.setText(
@@ -810,9 +825,7 @@ class MainWindow(QMainWindow):
             f"{self._format_numeric(self._calculate_output_angle_deg(), 2)} deg"
         )
 
-        if self.bridge is None:
-            self.encoder_state_label.setText("State: Simulated")
-        elif self.encoder_available:
+        if self.encoder_available:
             self.encoder_state_label.setText("State: Live")
         else:
             self.encoder_state_label.setText("State: Waiting for encoder")
@@ -857,13 +870,18 @@ class MainWindow(QMainWindow):
         )
 
     def read_encoder_raw(self):
-        # The simulator bypasses this path and injects spring-deflection encoder
-        # ticks directly. Keep a packed fallback frame here for non-simulated
-        # code paths in this GUI harness.
-        raw_data = self.encoder_raw
-        if raw_data is None or math.isnan(raw_data):
-            raw_data = SIMULATED_ENCODER_DC_BIAS_TICKS
-        return (int(round(raw_data)) & ENCODER_DATA_MASK) << ENCODER_STATUS_BITS
+        raw_val = 0
+        GPIO.output(ENCODER_CS, GPIO.LOW)
+        sleep(ENCODER_WAKE_DELAY_S)
+
+        for _ in range(ENCODER_FRAME_BITS):
+            GPIO.output(ENCODER_CLK, GPIO.LOW)
+            bit = GPIO.input(ENCODER_MISO)
+            raw_val = (raw_val << 1) | bit
+            GPIO.output(ENCODER_CLK, GPIO.HIGH)
+
+        GPIO.output(ENCODER_CS, GPIO.HIGH)
+        return raw_val
 
     def _format_numeric(self, value, decimals):
         if value is None or math.isnan(value):
@@ -873,7 +891,9 @@ class MainWindow(QMainWindow):
     def _calculate_output_angle_deg(self):
         if math.isnan(self.encoder_filtered):
             return math.nan
-        encoder_motion_ticks = self.encoder_filtered - SIMULATED_ENCODER_DC_BIAS_TICKS
+        if math.isnan(self.encoder_zero_raw):
+            return math.nan
+        encoder_motion_ticks = self.encoder_filtered - self.encoder_zero_raw
         return (encoder_motion_ticks / ENCODER_COUNTS_PER_REV) * 360.0
 
     def _update_simulated_plant(self):
@@ -927,6 +947,10 @@ class MainWindow(QMainWindow):
 
     def _process_closed_loop_control(self):
         if not self.closed_loop_enabled:
+            return
+
+        if not self._torque_feedback_ready():
+            self.closed_loop_toggle_button.setChecked(False)
             return
 
         if not self.emergency_stop_enabled or self.torque_limit_tripped:
@@ -1180,6 +1204,10 @@ class MainWindow(QMainWindow):
             self.set_status("Stepper State: DISABLED (E-Break: F)")
             return
 
+        if not self._torque_feedback_ready():
+            self._show_closed_loop_sensor_warning()
+            return
+
         torque_bound_mnm = self.closed_loop_automation_bound_input.value()
         point_count = self.closed_loop_automation_points_input.value()
         direction_sign = (
@@ -1329,6 +1357,22 @@ class MainWindow(QMainWindow):
         self._set_closed_loop_enabled(checked, target_tab_index)
 
     def _set_closed_loop_enabled(self, enabled, target_tab_index=None):
+        if enabled and not self._torque_feedback_ready():
+            self.closed_loop_lock_active = False
+            self.closed_loop_enabled = False
+            self.closed_loop_toggle_button.blockSignals(True)
+            self.closed_loop_toggle_button.setChecked(False)
+            self.closed_loop_toggle_button.blockSignals(False)
+            self.closed_loop_toggle_button.setText("Closed Loop: OFF")
+            self.closed_loop_toggle_button.setStyleSheet(
+                "background-color: #6b7280; color: white; font-weight: bold;"
+            )
+            self.closed_loop_status_label.setText(
+                "Closed-Loop State: Torque sensor not live"
+            )
+            self._show_closed_loop_sensor_warning()
+            return
+
         self.closed_loop_lock_active = enabled
         self.closed_loop_enabled = enabled
         if enabled:
@@ -1367,6 +1411,24 @@ class MainWindow(QMainWindow):
             self._set_motion_controls_enabled(True)
         if not self.torque_limit_tripped:
             self.set_status("Stepper State: IDLE")
+
+    def _torque_feedback_ready(self):
+        return (
+            self.bridge is not None
+            and self.tare_offset is not None
+            and not math.isnan(self.latest_voltage_ratio)
+            and not math.isnan(self.latest_force)
+        )
+
+    def _show_closed_loop_sensor_warning(self):
+        QMessageBox.warning(
+            self,
+            "Closed-Loop Unavailable",
+            (
+                "Closed-loop control requires a live torque sensor reading. "
+                "The motor was not moved."
+            ),
+        )
 
     def _show_closed_loop_tab_warning(self):
         QMessageBox.warning(
@@ -1491,11 +1553,14 @@ class MainWindow(QMainWindow):
         self.simulated_load_angle_rev = 0.0
         self.simulated_deflection_rev = 0.0
         self.simulated_transient_torque_mnm = 0.0
-        self.latest_force = 0.0
-        self.latest_voltage_ratio = 0.0
+        if self.bridge is None:
+            self.latest_force = 0.0
+            self.latest_voltage_ratio = 0.0
         self.last_simulated_plant_update_s = perf_counter()
-        self.encoder_raw = SIMULATED_ENCODER_DC_BIAS_TICKS
-        self.encoder_filtered = SIMULATED_ENCODER_DC_BIAS_TICKS
+        if self.encoder_available and not math.isnan(self.encoder_raw):
+            self.encoder_zero_raw = float(self.encoder_raw)
+        else:
+            self.encoder_zero_raw = math.nan
         self._update_step_counter_label()
 
     def return_to_zero(self):
