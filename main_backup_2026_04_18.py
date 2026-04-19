@@ -985,10 +985,19 @@ class MainWindow(QMainWindow):
 
         direction = CW if self.pid_step_accumulator > 0 else CCW
         self.pid_step_accumulator -= math.copysign(pulse_count, self.pid_step_accumulator)
-        self.step_counter += pulse_count if direction == CW else -pulse_count
-        self._update_step_counter_label()
         direction_text = "CW" if direction == CW else "CCW"
         self.set_status(f"Stepper State: PID {direction_text}")
+        pulses_sent = self._drive_stepper_pulses(
+            direction,
+            pulse_count,
+            max(abs(commanded_rate_hz), 1.0),
+            process_events=False,
+        )
+        missed_pulses = pulse_count - pulses_sent
+        if missed_pulses > 0:
+            self.pid_step_accumulator += math.copysign(
+                missed_pulses, commanded_rate_hz
+            )
         self.closed_loop_status_label.setText(
             f"Closed-Loop State: Active ({current_torque_mnm:.1f} mN-m)"
         )
@@ -1109,8 +1118,12 @@ class MainWindow(QMainWindow):
         if pulse_count <= 0:
             return
 
-        self.step_counter += (1 if self.calibration_direction == CW else -1) * pulse_count
-        self._update_step_counter_label()
+        self._drive_stepper_pulses(
+            self.calibration_direction,
+            pulse_count,
+            frequency_hz,
+            process_events=False,
+        )
 
     def run_manual_actuation(self):
         if not self.emergency_stop_enabled:
@@ -1224,21 +1237,38 @@ class MainWindow(QMainWindow):
         self.set_status(f"Stepper State: MOVING {direction_text}")
         self._reset_actuation_torque_history()
 
-        raw_val = 0
-        for _ in range(pulse_count):
-            if self.stop_requested:
-                break
-            raw_val += 1
-            self.step_counter += 1 if direction == CW else -1
-            if self.step_counter % 50 == 0:
-                self._update_step_counter_label()
-            sleep(0.5 / frequency_hz)
-            QApplication.processEvents()
-
-        self._update_step_counter_label()
+        self._drive_stepper_pulses(direction, pulse_count, frequency_hz)
 
         if not self.stop_requested and not self.torque_limit_tripped:
             self.set_status("Stepper State: IDLE")
+
+    def _drive_stepper_pulses(
+        self, direction, pulse_count, frequency_hz, process_events=True
+    ):
+        if pulse_count <= 0:
+            return 0
+
+        GPIO.output(DIR, direction)
+        sleep(DIR_SETUP_DELAY_S)
+
+        pulse_delay_s = 0.5 / max(float(frequency_hz), 1.0)
+        pulses_sent = 0
+        for _ in range(pulse_count):
+            if self.stop_requested or self.torque_limit_tripped:
+                break
+            GPIO.output(STEP, GPIO.HIGH)
+            sleep(pulse_delay_s)
+            GPIO.output(STEP, GPIO.LOW)
+            sleep(pulse_delay_s)
+            self.step_counter += 1 if direction == CW else -1
+            pulses_sent += 1
+            if self.step_counter % 50 == 0:
+                self._update_step_counter_label()
+            if process_events:
+                QApplication.processEvents()
+
+        self._update_step_counter_label()
+        return pulses_sent
 
     def wait_with_stop(self, seconds):
         self.set_status("Stepper State: IDLE")
