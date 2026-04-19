@@ -100,6 +100,11 @@ PID_KI = 0.0
 PID_KD = 0.0008
 PID_MAX_STEP_RATE_HZ = 220.0
 PID_MAX_RATE_CHANGE_HZ_PER_S = 600.0
+PID_CAPTURE_BAND_MNM = 50.0
+PID_RELEASE_BAND_MNM = 100.0
+APPROACH_MIN_STEP_RATE_HZ = 20.0
+APPROACH_MAX_STEP_RATE_HZ = 250.0
+APPROACH_SLOWDOWN_BAND_MNM = 300.0
 PID_PULSE_OUTPUT_FREQUENCY_HZ = 500.0
 PID_MAX_PULSES_PER_TICK = 2
 PID_INTEGRAL_LIMIT = 10000.0
@@ -304,6 +309,7 @@ class MainWindow(QMainWindow):
         self.pid_step_accumulator = 0.0
         self.pid_commanded_rate_hz = 0.0
         self.pid_hysteresis_active = False
+        self.closed_loop_mode = "approach"
         self.simulated_output_angle_rev = 0.0
         self.simulated_load_angle_rev = 0.0
         self.simulated_deflection_rev = 0.0
@@ -958,6 +964,14 @@ class MainWindow(QMainWindow):
         self.pid_step_accumulator = 0.0
         self.pid_commanded_rate_hz = 0.0
         self.pid_hysteresis_active = False
+        self.closed_loop_mode = "approach"
+
+    def _reset_pid_capture_state(self):
+        self.pid_integral = 0.0
+        self.pid_previous_torque_mnm = math.nan
+        self.pid_step_accumulator = 0.0
+        self.pid_commanded_rate_hz = 0.0
+        self.pid_hysteresis_active = False
 
     def _process_closed_loop_control(self):
         if not self.closed_loop_enabled:
@@ -983,39 +997,61 @@ class MainWindow(QMainWindow):
 
         target_torque_mnm = self.closed_loop_target_input.value()
         error_mnm = target_torque_mnm - current_torque_mnm
+        abs_error_mnm = abs(error_mnm)
 
-        if not self.pid_hysteresis_active:
-            if abs(error_mnm) <= PID_HYSTERESIS_REENTRY_MNM:
-                error_mnm = 0.0
-            else:
-                self.pid_hysteresis_active = True
-        elif abs(error_mnm) <= PID_ERROR_DEADBAND_MNM:
-            self.pid_hysteresis_active = False
-            error_mnm = 0.0
+        if self.closed_loop_mode == "approach":
+            if abs_error_mnm <= PID_CAPTURE_BAND_MNM:
+                self.closed_loop_mode = "capture"
+                self._reset_pid_capture_state()
+        elif abs_error_mnm >= PID_RELEASE_BAND_MNM:
+            self.closed_loop_mode = "approach"
+            self._reset_pid_capture_state()
 
-        self.pid_integral += error_mnm * delta_s
-        if error_mnm == 0.0:
+        if self.closed_loop_mode == "approach":
+            direction_sign = 1.0 if error_mnm > 0.0 else -1.0
+            approach_fraction = min(
+                abs_error_mnm / APPROACH_SLOWDOWN_BAND_MNM, 1.0
+            )
+            approach_rate_hz = APPROACH_MIN_STEP_RATE_HZ + approach_fraction * (
+                APPROACH_MAX_STEP_RATE_HZ - APPROACH_MIN_STEP_RATE_HZ
+            )
+            target_rate_hz = direction_sign * approach_rate_hz
             self.pid_integral = 0.0
-        self.pid_integral = max(
-            min(self.pid_integral, PID_INTEGRAL_LIMIT), -PID_INTEGRAL_LIMIT
-        )
-
-        if math.isnan(self.pid_previous_torque_mnm):
-            torque_derivative_mnm_s = 0.0
+            self.pid_previous_torque_mnm = math.nan
+            self.pid_hysteresis_active = False
         else:
-            torque_derivative_mnm_s = (
-                current_torque_mnm - self.pid_previous_torque_mnm
-            ) / delta_s
-        self.pid_previous_torque_mnm = current_torque_mnm
+            if not self.pid_hysteresis_active:
+                if abs(error_mnm) <= PID_HYSTERESIS_REENTRY_MNM:
+                    error_mnm = 0.0
+                else:
+                    self.pid_hysteresis_active = True
+            elif abs(error_mnm) <= PID_ERROR_DEADBAND_MNM:
+                self.pid_hysteresis_active = False
+                error_mnm = 0.0
 
-        target_rate_hz = (
-            PID_KP * error_mnm
-            + PID_KI * self.pid_integral
-            - PID_KD * torque_derivative_mnm_s
-        )
-        target_rate_hz = max(
-            min(target_rate_hz, PID_MAX_STEP_RATE_HZ), -PID_MAX_STEP_RATE_HZ
-        )
+            self.pid_integral += error_mnm * delta_s
+            if error_mnm == 0.0:
+                self.pid_integral = 0.0
+            self.pid_integral = max(
+                min(self.pid_integral, PID_INTEGRAL_LIMIT), -PID_INTEGRAL_LIMIT
+            )
+
+            if math.isnan(self.pid_previous_torque_mnm):
+                torque_derivative_mnm_s = 0.0
+            else:
+                torque_derivative_mnm_s = (
+                    current_torque_mnm - self.pid_previous_torque_mnm
+                ) / delta_s
+            self.pid_previous_torque_mnm = current_torque_mnm
+
+            target_rate_hz = (
+                PID_KP * error_mnm
+                + PID_KI * self.pid_integral
+                - PID_KD * torque_derivative_mnm_s
+            )
+            target_rate_hz = max(
+                min(target_rate_hz, PID_MAX_STEP_RATE_HZ), -PID_MAX_STEP_RATE_HZ
+            )
         max_rate_delta = PID_MAX_RATE_CHANGE_HZ_PER_S * delta_s
         rate_delta = target_rate_hz - self.pid_commanded_rate_hz
         rate_delta = max(min(rate_delta, max_rate_delta), -max_rate_delta)
@@ -1028,6 +1064,7 @@ class MainWindow(QMainWindow):
             self.closed_loop_status_label.setText(
                 "Closed-Loop State: Holding "
                 f"({current_torque_mnm:.1f} mN-m, "
+                f"{self.closed_loop_mode}, "
                 f"error {error_mnm:.1f} mN-m, "
                 f"rate {commanded_rate_hz:.1f} step/s)"
             )
@@ -1053,7 +1090,9 @@ class MainWindow(QMainWindow):
                 missed_pulses, commanded_rate_hz
             )
         self.closed_loop_status_label.setText(
-            f"Closed-Loop State: Active ({current_torque_mnm:.1f} mN-m)"
+            "Closed-Loop State: Active "
+            f"({self.closed_loop_mode}, {current_torque_mnm:.1f} mN-m, "
+            f"error {error_mnm:.1f} mN-m)"
         )
         self._process_closed_loop_automation(current_time_s)
 
