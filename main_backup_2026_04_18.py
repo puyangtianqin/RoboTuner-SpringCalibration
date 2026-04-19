@@ -1,6 +1,9 @@
+import csv
 import math
+import re
 import sys
 from collections import deque
+from datetime import datetime
 from time import perf_counter, sleep
 
 from PyQt5.QtCore import QEvent, QPointF, QTimer, Qt
@@ -96,6 +99,8 @@ PID_KP = 0.2
 PID_KI = 0.01
 PID_KD = 0.0015
 PID_MAX_STEP_RATE_HZ = 500.0
+PID_PULSE_OUTPUT_FREQUENCY_HZ = 500.0
+PID_MAX_PULSES_PER_TICK = 4
 PID_INTEGRAL_LIMIT = 50000.0
 PID_ERROR_DEADBAND_MNM = 2.0
 PID_HYSTERESIS_REENTRY_MNM = PID_ERROR_DEADBAND_MNM
@@ -278,6 +283,11 @@ class MainWindow(QMainWindow):
         self.closed_loop_automation_hold_started_s = None
         self.closed_loop_automation_settled_started_s = None
         self.meaningful_logging_enabled = False
+        self.start_time_s = perf_counter()
+        self.last_log_time_s = self.start_time_s
+        self.last_csv_flush_s = self.start_time_s
+        self.csv_file = None
+        self.csv_writer = None
         self.encoder_available = False
         self.encoder_filtered = math.nan
         self.encoder_raw = math.nan
@@ -728,7 +738,7 @@ class MainWindow(QMainWindow):
     def _start_sensor_refresh(self):
         self.sensor_timer = QTimer(self)
         self.sensor_timer.timeout.connect(self.refresh_sensor_labels)
-        self.sensor_timer.start(100)
+        self.sensor_timer.start(20)
 
     def eventFilter(self, source, event):
         if (
@@ -781,6 +791,7 @@ class MainWindow(QMainWindow):
         self._check_torque_limit(displayed_torque)
         self.refresh_encoder_labels()
         self._update_waveforms()
+        self.log_data()
 
         if self.bridge is None:
             self.sensor_state_label.setText("State: Simulated")
@@ -999,8 +1010,8 @@ class MainWindow(QMainWindow):
         )
 
         self.pid_step_accumulator += commanded_rate_hz * delta_s
-        pulse_count = int(abs(self.pid_step_accumulator))
-        if pulse_count <= 0:
+        available_pulse_count = int(abs(self.pid_step_accumulator))
+        if available_pulse_count <= 0:
             self.closed_loop_status_label.setText(
                 "Closed-Loop State: Holding "
                 f"({current_torque_mnm:.1f} mN-m, "
@@ -1011,13 +1022,16 @@ class MainWindow(QMainWindow):
             return
 
         direction = CW if self.pid_step_accumulator > 0 else CCW
-        self.pid_step_accumulator -= math.copysign(pulse_count, self.pid_step_accumulator)
+        pulse_count = min(available_pulse_count, PID_MAX_PULSES_PER_TICK)
+        self.pid_step_accumulator -= math.copysign(
+            pulse_count, self.pid_step_accumulator
+        )
         direction_text = "CW" if direction == CW else "CCW"
         self.set_status(f"Stepper State: PID {direction_text}")
         pulses_sent = self._drive_stepper_pulses(
             direction,
             pulse_count,
-            max(abs(commanded_rate_hz), 1.0),
+            PID_PULSE_OUTPUT_FREQUENCY_HZ,
             process_events=False,
         )
         missed_pulses = pulse_count - pulses_sent
@@ -1614,6 +1628,76 @@ class MainWindow(QMainWindow):
             self.request_stop()
             self.active_tab_index = index
 
+    def _safe_serial_number(self):
+        serial_number = self.serial_number_input.text().strip()
+        if not serial_number:
+            serial_number = "RoboTuners_Test"
+        serial_number = re.sub(r"[^A-Za-z0-9_.-]+", "_", serial_number)
+        return serial_number.strip("._-") or "RoboTuners_Test"
+
+    def _ensure_csv_logger(self):
+        if self.csv_writer is not None:
+            return
+
+        serial_number = self._safe_serial_number()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{serial_number}_{timestamp}.csv"
+        self.csv_file = open(filename, "w", newline="")
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow(
+            [
+                "time_s",
+                "serial_number",
+                "meaningful_logging",
+                "voltage_ratio",
+                "torque_mnm",
+                "encoder_raw",
+                "encoder_filtered",
+                "encoder_angle_deg",
+                "step_counter",
+                "closed_loop_enabled",
+                "closed_loop_target_mnm",
+            ]
+        )
+
+    def log_data(self):
+        current_time_s = perf_counter()
+        log_rate_hz = (
+            self.data_rate_input.value() if self.meaningful_logging_enabled else 1.0
+        )
+        log_interval_s = 1.0 / max(log_rate_hz, 0.1)
+        if current_time_s - self.last_log_time_s < log_interval_s:
+            return
+
+        torque_mnm = self.latest_force * DISPLAY_TORQUE_SCALE
+        if math.isnan(torque_mnm) and math.isnan(self.encoder_filtered):
+            return
+
+        self._ensure_csv_logger()
+        elapsed_s = current_time_s - self.start_time_s
+        target_torque_mnm = (
+            self.closed_loop_target_input.value() if self.closed_loop_enabled else math.nan
+        )
+        self.csv_writer.writerow(
+            [
+                f"{elapsed_s:.6f}",
+                self._safe_serial_number(),
+                int(self.meaningful_logging_enabled),
+                self.latest_voltage_ratio,
+                torque_mnm,
+                self.encoder_raw,
+                self.encoder_filtered,
+                self._calculate_output_angle_deg(),
+                self.step_counter,
+                int(self.closed_loop_enabled),
+                target_torque_mnm,
+            ]
+        )
+        self.last_log_time_s = current_time_s
+        if current_time_s - self.last_csv_flush_s >= 1.0:
+            self.csv_file.flush()
+            self.last_csv_flush_s = current_time_s
+
     def closeEvent(self, event):
         self.stop_manual_calibration_move()
         if self.bridge is not None:
@@ -1621,6 +1705,8 @@ class MainWindow(QMainWindow):
                 self.bridge.close()
             except Exception:
                 pass
+        if self.csv_file is not None:
+            self.csv_file.close()
         GPIO.cleanup()
         super().closeEvent(event)
 
