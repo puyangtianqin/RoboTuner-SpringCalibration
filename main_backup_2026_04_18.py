@@ -95,10 +95,11 @@ DISPLAY_TORQUE_SCALE = 1000.0
 DEFAULT_TORQUE_LIMIT_MNM = 10000.0
 CLOSED_LOOP_REFERENCE_MAX_OFFSET_MNM = 10000.0
 PID_CONTROL_INTERVAL_MS = 20
-PID_KP = 0.05
+PID_KP = 0.08
 PID_KI = 0.0
-PID_KD = 0.0005
-PID_MAX_STEP_RATE_HZ = 150.0
+PID_KD = 0.0008
+PID_MAX_STEP_RATE_HZ = 220.0
+PID_MAX_RATE_CHANGE_HZ_PER_S = 600.0
 PID_PULSE_OUTPUT_FREQUENCY_HZ = 500.0
 PID_MAX_PULSES_PER_TICK = 2
 PID_INTEGRAL_LIMIT = 10000.0
@@ -301,6 +302,7 @@ class MainWindow(QMainWindow):
         self.pid_previous_torque_mnm = math.nan
         self.pid_last_update_s = perf_counter()
         self.pid_step_accumulator = 0.0
+        self.pid_commanded_rate_hz = 0.0
         self.pid_hysteresis_active = False
         self.simulated_output_angle_rev = 0.0
         self.simulated_load_angle_rev = 0.0
@@ -954,6 +956,7 @@ class MainWindow(QMainWindow):
         self.pid_previous_torque_mnm = math.nan
         self.pid_last_update_s = perf_counter()
         self.pid_step_accumulator = 0.0
+        self.pid_commanded_rate_hz = 0.0
         self.pid_hysteresis_active = False
 
     def _process_closed_loop_control(self):
@@ -1005,14 +1008,19 @@ class MainWindow(QMainWindow):
             ) / delta_s
         self.pid_previous_torque_mnm = current_torque_mnm
 
-        commanded_rate_hz = (
+        target_rate_hz = (
             PID_KP * error_mnm
             + PID_KI * self.pid_integral
             - PID_KD * torque_derivative_mnm_s
         )
-        commanded_rate_hz = max(
-            min(commanded_rate_hz, PID_MAX_STEP_RATE_HZ), -PID_MAX_STEP_RATE_HZ
+        target_rate_hz = max(
+            min(target_rate_hz, PID_MAX_STEP_RATE_HZ), -PID_MAX_STEP_RATE_HZ
         )
+        max_rate_delta = PID_MAX_RATE_CHANGE_HZ_PER_S * delta_s
+        rate_delta = target_rate_hz - self.pid_commanded_rate_hz
+        rate_delta = max(min(rate_delta, max_rate_delta), -max_rate_delta)
+        self.pid_commanded_rate_hz += rate_delta
+        commanded_rate_hz = self.pid_commanded_rate_hz
 
         self.pid_step_accumulator += commanded_rate_hz * delta_s
         available_pulse_count = int(abs(self.pid_step_accumulator))
