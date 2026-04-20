@@ -183,7 +183,76 @@ ENCODER_STATUS_MASK = 0x3F
 ENCODER_WAKE_DELAY_S = 0.000005
 ENCODER_COUNTS_PER_REV = ENCODER_DATA_MASK + 1
 
+# UI and logging configuration.
+APP_TITLE = "Senior Design"
+APP_WINDOW_WIDTH = 1000
+APP_WINDOW_HEIGHT = 600
+SIDE_PANEL_WIDTH = 240
+INPUT_WIDTH = 120
+PRIMARY_BUTTON_HEIGHT = 40
+SMALL_BUTTON_HEIGHT = 32
+LOGGING_BUTTON_HEIGHT = 36
 PLOT_HISTORY = 200
+PLOT_MIN_HEIGHT = 120
+SENSOR_REFRESH_INTERVAL_MS = 20
+TORQUE_SENSOR_ATTACH_TIMEOUT_MS = 5000
+STEP_COUNTER_LABEL_UPDATE_INTERVAL_STEPS = 50
+MIN_STEPPER_FREQUENCY_HZ = 1.0
+WAIT_POLL_INTERVAL_S = 0.05
+DEFAULT_SERIAL_NUMBER = "RoboTuners_Test"
+CSV_BACKGROUND_LOG_RATE_HZ = 1.0
+CSV_MIN_LOG_RATE_HZ = 0.1
+CSV_FLUSH_INTERVAL_S = 1.0
+
+# UI input ranges and defaults.
+ACTUATION_FREQUENCY_MIN_HZ = 1.0
+ACTUATION_FREQUENCY_MAX_HZ = 10000.0
+ACTUATION_FREQUENCY_STEP_HZ = 50.0
+ACTUATION_FREQUENCY_DECIMALS = 1
+TORQUE_LIMIT_INPUT_MIN_MNM = 1.0
+TORQUE_LIMIT_INPUT_MAX_MNM = 1_000_000.0
+TORQUE_LIMIT_INPUT_STEP_MNM = 100.0
+TORQUE_LIMIT_INPUT_DECIMALS = 1
+DATA_RATE_INPUT_MIN_HZ = 0.1
+DATA_RATE_INPUT_MAX_HZ = 1000.0
+DATA_RATE_INPUT_STEP_HZ = 1.0
+DATA_RATE_INPUT_DECIMALS = 1
+DATA_RATE_INPUT_DEFAULT_HZ = 10.0
+MANUAL_REV_MIN = -1.0
+MANUAL_REV_MAX = 1.0
+MANUAL_REV_STEP = 0.01
+MANUAL_REV_DECIMALS = 3
+AUTO_STEP_REV_MIN = 0.001
+AUTO_STEP_REV_MAX = 1.0
+AUTO_STEP_REV_STEP = 0.01
+AUTO_STEP_REV_DECIMALS = 3
+AUTO_STEP_REV_DEFAULT = 0.10
+AUTO_POINT_COUNT_MIN = 1
+AUTO_POINT_COUNT_MAX = 1000
+AUTO_POINT_COUNT_DEFAULT = 10
+AUTO_PAUSE_MIN_S = 0.0
+AUTO_PAUSE_MAX_S = 3600.0
+AUTO_PAUSE_STEP_S = 0.5
+AUTO_PAUSE_DECIMALS = 1
+AUTO_PAUSE_DEFAULT_S = 2.0
+CLOSED_LOOP_TARGET_MIN_MNM = -1_000_000.0
+CLOSED_LOOP_TARGET_MAX_MNM = 1_000_000.0
+CLOSED_LOOP_TARGET_STEP_MNM = 100.0
+CLOSED_LOOP_TARGET_DECIMALS = 2
+CLOSED_LOOP_TARGET_DEFAULT_MNM = 0.0
+CLOSED_LOOP_AUTOMATION_BOUND_MIN_MNM = 0.1
+CLOSED_LOOP_AUTOMATION_BOUND_MAX_MNM = 1_000_000.0
+CLOSED_LOOP_AUTOMATION_BOUND_STEP_MNM = 100.0
+CLOSED_LOOP_AUTOMATION_BOUND_DECIMALS = 2
+CLOSED_LOOP_AUTOMATION_BOUND_DEFAULT_MNM = 1000.0
+CLOSED_LOOP_AUTOMATION_POINT_COUNT_MIN = 1
+CLOSED_LOOP_AUTOMATION_POINT_COUNT_MAX = 1000
+CLOSED_LOOP_AUTOMATION_POINT_COUNT_DEFAULT = 10
+CLOSED_LOOP_AUTOMATION_PAUSE_MIN_S = 0.0
+CLOSED_LOOP_AUTOMATION_PAUSE_MAX_S = 3600.0
+CLOSED_LOOP_AUTOMATION_PAUSE_STEP_S = 0.5
+CLOSED_LOOP_AUTOMATION_PAUSE_DECIMALS = 1
+CLOSED_LOOP_AUTOMATION_PAUSE_DEFAULT_S = 2.0
 
 
 class WaveformWidget(QWidget):
@@ -196,7 +265,7 @@ class WaveformWidget(QWidget):
         self.reference_visible = False
         self.reference_pen = QPen(QColor("#1d4ed8"), 2, Qt.DashLine)
         self.reference_samples = deque(maxlen=PLOT_HISTORY)
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(PLOT_MIN_HEIGHT)
 
     def update_samples(self, samples):
         if self.paused:
@@ -312,8 +381,8 @@ class WaveformWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Senior Design")
-        self.resize(1000, 600)
+        self.setWindowTitle(APP_TITLE)
+        self.resize(APP_WINDOW_WIDTH, APP_WINDOW_HEIGHT)
         self.stop_requested = False
         self.emergency_stop_enabled = False
         self.step_counter = 0
@@ -392,18 +461,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         action_panel = QWidget()
-        action_panel.setFixedWidth(240)
+        action_panel.setFixedWidth(SIDE_PANEL_WIDTH)
         action_layout = QVBoxLayout(action_panel)
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(8)
 
         self.brake_button = QPushButton("Brake")
-        self.brake_button.setFixedHeight(40)
+        self.brake_button.setFixedHeight(PRIMARY_BUTTON_HEIGHT)
         self.brake_button.clicked.connect(self.request_stop)
         action_layout.addWidget(self.brake_button)
 
         self.emergency_stop_button = QPushButton("Stepper Disabled")
-        self.emergency_stop_button.setFixedHeight(40)
+        self.emergency_stop_button.setFixedHeight(PRIMARY_BUTTON_HEIGHT)
         self.emergency_stop_button.setCheckable(True)
         self.emergency_stop_button.toggled.connect(self.on_emergency_stop_toggled)
         action_layout.addWidget(self.emergency_stop_button)
@@ -416,12 +485,12 @@ class MainWindow(QMainWindow):
         counter_button_row.setSpacing(8)
 
         self.reset_counter_button = QPushButton("Reset Counter")
-        self.reset_counter_button.setFixedHeight(32)
+        self.reset_counter_button.setFixedHeight(SMALL_BUTTON_HEIGHT)
         self.reset_counter_button.clicked.connect(self.reset_step_counter)
         counter_button_row.addWidget(self.reset_counter_button)
 
         self.return_to_zero_button = QPushButton("Return to Zero")
-        self.return_to_zero_button.setFixedHeight(32)
+        self.return_to_zero_button.setFixedHeight(SMALL_BUTTON_HEIGHT)
         self.return_to_zero_button.clicked.connect(self.return_to_zero)
         counter_button_row.addWidget(self.return_to_zero_button)
 
@@ -435,10 +504,12 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(speed_label)
 
         self.actuation_frequency_input = QDoubleSpinBox()
-        self.actuation_frequency_input.setFixedWidth(120)
-        self.actuation_frequency_input.setRange(1.0, 10000.0)
-        self.actuation_frequency_input.setSingleStep(50.0)
-        self.actuation_frequency_input.setDecimals(1)
+        self.actuation_frequency_input.setFixedWidth(INPUT_WIDTH)
+        self.actuation_frequency_input.setRange(
+            ACTUATION_FREQUENCY_MIN_HZ, ACTUATION_FREQUENCY_MAX_HZ
+        )
+        self.actuation_frequency_input.setSingleStep(ACTUATION_FREQUENCY_STEP_HZ)
+        self.actuation_frequency_input.setDecimals(ACTUATION_FREQUENCY_DECIMALS)
         self.actuation_frequency_input.setValue(self.actuation_frequency_hz)
         self.actuation_frequency_input.valueChanged.connect(
             self.on_actuation_frequency_changed
@@ -449,16 +520,18 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(torque_limit_label)
 
         self.torque_limit_input = QDoubleSpinBox()
-        self.torque_limit_input.setFixedWidth(120)
-        self.torque_limit_input.setRange(1.0, 1_000_000.0)
-        self.torque_limit_input.setSingleStep(100.0)
-        self.torque_limit_input.setDecimals(1)
+        self.torque_limit_input.setFixedWidth(INPUT_WIDTH)
+        self.torque_limit_input.setRange(
+            TORQUE_LIMIT_INPUT_MIN_MNM, TORQUE_LIMIT_INPUT_MAX_MNM
+        )
+        self.torque_limit_input.setSingleStep(TORQUE_LIMIT_INPUT_STEP_MNM)
+        self.torque_limit_input.setDecimals(TORQUE_LIMIT_INPUT_DECIMALS)
         self.torque_limit_input.setValue(self.torque_limit_mnm)
         self.torque_limit_input.valueChanged.connect(self.on_torque_limit_changed)
         action_layout.addWidget(self.torque_limit_input)
 
         self.meaningful_logging_button = QPushButton("Meaningful Logging: OFF")
-        self.meaningful_logging_button.setFixedHeight(36)
+        self.meaningful_logging_button.setFixedHeight(LOGGING_BUTTON_HEIGHT)
         self.meaningful_logging_button.setCheckable(True)
         self.meaningful_logging_button.toggled.connect(
             self.on_meaningful_logging_toggled
@@ -474,19 +547,19 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(data_rate_label)
 
         self.data_rate_input = QDoubleSpinBox()
-        self.data_rate_input.setFixedWidth(120)
-        self.data_rate_input.setRange(0.1, 1000.0)
-        self.data_rate_input.setSingleStep(1.0)
-        self.data_rate_input.setDecimals(1)
-        self.data_rate_input.setValue(10.0)
+        self.data_rate_input.setFixedWidth(INPUT_WIDTH)
+        self.data_rate_input.setRange(DATA_RATE_INPUT_MIN_HZ, DATA_RATE_INPUT_MAX_HZ)
+        self.data_rate_input.setSingleStep(DATA_RATE_INPUT_STEP_HZ)
+        self.data_rate_input.setDecimals(DATA_RATE_INPUT_DECIMALS)
+        self.data_rate_input.setValue(DATA_RATE_INPUT_DEFAULT_HZ)
         action_layout.addWidget(self.data_rate_input)
 
         serial_number_label = QLabel("Unique Serial Number")
         action_layout.addWidget(serial_number_label)
 
         self.serial_number_input = QLineEdit()
-        self.serial_number_input.setFixedWidth(120)
-        self.serial_number_input.setText("RoboTuners_Test")
+        self.serial_number_input.setFixedWidth(INPUT_WIDTH)
+        self.serial_number_input.setText(DEFAULT_SERIAL_NUMBER)
         self.serial_number_input.setPlaceholderText("Enter serial number")
         # Keep this field in the GUI test harness for now. When this UI is moved
         # into the main file, use the entered serial number to help name the CSV.
@@ -500,7 +573,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.tabs, 2)
 
         self.sensor_panel = QWidget()
-        self.sensor_panel.setFixedWidth(240)
+        self.sensor_panel.setFixedWidth(SIDE_PANEL_WIDTH)
         root_layout.addWidget(self.sensor_panel, 1)
 
         self.manual_tab = QWidget()
@@ -540,9 +613,9 @@ class MainWindow(QMainWindow):
         ).setGeometry(40, 40, 260, 30)
 
         self.manual_rev_input = QDoubleSpinBox(self.manual_tab)
-        self.manual_rev_input.setRange(-1.0, 1.0)
-        self.manual_rev_input.setSingleStep(0.01)
-        self.manual_rev_input.setDecimals(3)
+        self.manual_rev_input.setRange(MANUAL_REV_MIN, MANUAL_REV_MAX)
+        self.manual_rev_input.setSingleStep(MANUAL_REV_STEP)
+        self.manual_rev_input.setDecimals(MANUAL_REV_DECIMALS)
         self.manual_rev_input.setGeometry(40, 75, 120, 35)
 
         self.manual_actuation_button = QPushButton("Actuation Cmd", self.manual_tab)
@@ -568,28 +641,30 @@ class MainWindow(QMainWindow):
             40, 40, 180, 30
         )
         self.auto_step_rev_input = QDoubleSpinBox(self.automation_tab)
-        self.auto_step_rev_input.setRange(0.001, 1.0)
-        self.auto_step_rev_input.setSingleStep(0.01)
-        self.auto_step_rev_input.setDecimals(3)
-        self.auto_step_rev_input.setValue(0.10)
+        self.auto_step_rev_input.setRange(AUTO_STEP_REV_MIN, AUTO_STEP_REV_MAX)
+        self.auto_step_rev_input.setSingleStep(AUTO_STEP_REV_STEP)
+        self.auto_step_rev_input.setDecimals(AUTO_STEP_REV_DECIMALS)
+        self.auto_step_rev_input.setValue(AUTO_STEP_REV_DEFAULT)
         self.auto_step_rev_input.setGeometry(40, 75, 120, 35)
 
         QLabel("Number of points", self.automation_tab).setGeometry(
             220, 40, 140, 30
         )
         self.auto_point_count_input = QSpinBox(self.automation_tab)
-        self.auto_point_count_input.setRange(1, 1000)
-        self.auto_point_count_input.setValue(10)
+        self.auto_point_count_input.setRange(
+            AUTO_POINT_COUNT_MIN, AUTO_POINT_COUNT_MAX
+        )
+        self.auto_point_count_input.setValue(AUTO_POINT_COUNT_DEFAULT)
         self.auto_point_count_input.setGeometry(220, 75, 120, 35)
 
         QLabel("Stop time per point (s)", self.automation_tab).setGeometry(
             40, 125, 180, 30
         )
         self.auto_pause_input = QDoubleSpinBox(self.automation_tab)
-        self.auto_pause_input.setRange(0.0, 3600.0)
-        self.auto_pause_input.setSingleStep(0.5)
-        self.auto_pause_input.setDecimals(1)
-        self.auto_pause_input.setValue(2.0)
+        self.auto_pause_input.setRange(AUTO_PAUSE_MIN_S, AUTO_PAUSE_MAX_S)
+        self.auto_pause_input.setSingleStep(AUTO_PAUSE_STEP_S)
+        self.auto_pause_input.setDecimals(AUTO_PAUSE_DECIMALS)
+        self.auto_pause_input.setValue(AUTO_PAUSE_DEFAULT_S)
         self.auto_pause_input.setGeometry(40, 160, 120, 35)
 
         QLabel("Direction", self.automation_tab).setGeometry(220, 125, 100, 30)
@@ -620,10 +695,12 @@ class MainWindow(QMainWindow):
         )
         self.closed_loop_target_input = QDoubleSpinBox(self.closed_loop_tab)
         self.closed_loop_target_input.setGeometry(40, 140, 140, 35)
-        self.closed_loop_target_input.setRange(-1_000_000.0, 1_000_000.0)
-        self.closed_loop_target_input.setDecimals(2)
-        self.closed_loop_target_input.setSingleStep(100.0)
-        self.closed_loop_target_input.setValue(0.0)
+        self.closed_loop_target_input.setRange(
+            CLOSED_LOOP_TARGET_MIN_MNM, CLOSED_LOOP_TARGET_MAX_MNM
+        )
+        self.closed_loop_target_input.setDecimals(CLOSED_LOOP_TARGET_DECIMALS)
+        self.closed_loop_target_input.setSingleStep(CLOSED_LOOP_TARGET_STEP_MNM)
+        self.closed_loop_target_input.setValue(CLOSED_LOOP_TARGET_DEFAULT_MNM)
         self.closed_loop_target_input.editingFinished.connect(
             self.validate_closed_loop_reference
         )
@@ -664,10 +741,19 @@ class MainWindow(QMainWindow):
             self.closed_loop_automation_tab
         )
         self.closed_loop_automation_bound_input.setGeometry(40, 140, 140, 35)
-        self.closed_loop_automation_bound_input.setRange(0.1, 1_000_000.0)
-        self.closed_loop_automation_bound_input.setDecimals(2)
-        self.closed_loop_automation_bound_input.setSingleStep(100.0)
-        self.closed_loop_automation_bound_input.setValue(1000.0)
+        self.closed_loop_automation_bound_input.setRange(
+            CLOSED_LOOP_AUTOMATION_BOUND_MIN_MNM,
+            CLOSED_LOOP_AUTOMATION_BOUND_MAX_MNM,
+        )
+        self.closed_loop_automation_bound_input.setDecimals(
+            CLOSED_LOOP_AUTOMATION_BOUND_DECIMALS
+        )
+        self.closed_loop_automation_bound_input.setSingleStep(
+            CLOSED_LOOP_AUTOMATION_BOUND_STEP_MNM
+        )
+        self.closed_loop_automation_bound_input.setValue(
+            CLOSED_LOOP_AUTOMATION_BOUND_DEFAULT_MNM
+        )
 
         QLabel("Torque Points", self.closed_loop_automation_tab).setGeometry(
             220, 105, 140, 30
@@ -676,8 +762,13 @@ class MainWindow(QMainWindow):
             self.closed_loop_automation_tab
         )
         self.closed_loop_automation_points_input.setGeometry(220, 140, 120, 35)
-        self.closed_loop_automation_points_input.setRange(1, 1000)
-        self.closed_loop_automation_points_input.setValue(10)
+        self.closed_loop_automation_points_input.setRange(
+            CLOSED_LOOP_AUTOMATION_POINT_COUNT_MIN,
+            CLOSED_LOOP_AUTOMATION_POINT_COUNT_MAX,
+        )
+        self.closed_loop_automation_points_input.setValue(
+            CLOSED_LOOP_AUTOMATION_POINT_COUNT_DEFAULT
+        )
 
         QLabel(
             "Hold Time After Settling (s)", self.closed_loop_automation_tab
@@ -686,10 +777,19 @@ class MainWindow(QMainWindow):
             self.closed_loop_automation_tab
         )
         self.closed_loop_automation_pause_input.setGeometry(40, 230, 140, 35)
-        self.closed_loop_automation_pause_input.setRange(0.0, 3600.0)
-        self.closed_loop_automation_pause_input.setDecimals(1)
-        self.closed_loop_automation_pause_input.setSingleStep(0.5)
-        self.closed_loop_automation_pause_input.setValue(2.0)
+        self.closed_loop_automation_pause_input.setRange(
+            CLOSED_LOOP_AUTOMATION_PAUSE_MIN_S,
+            CLOSED_LOOP_AUTOMATION_PAUSE_MAX_S,
+        )
+        self.closed_loop_automation_pause_input.setDecimals(
+            CLOSED_LOOP_AUTOMATION_PAUSE_DECIMALS
+        )
+        self.closed_loop_automation_pause_input.setSingleStep(
+            CLOSED_LOOP_AUTOMATION_PAUSE_STEP_S
+        )
+        self.closed_loop_automation_pause_input.setValue(
+            CLOSED_LOOP_AUTOMATION_PAUSE_DEFAULT_S
+        )
 
         QLabel("Direction", self.closed_loop_automation_tab).setGeometry(
             220, 195, 120, 30
@@ -791,7 +891,7 @@ class MainWindow(QMainWindow):
             self.bridge.setChannel(TORQUE_CHANNEL)
             self.bridge.setOnAttachHandler(self.on_sensor_attach)
             self.bridge.setOnVoltageRatioChangeHandler(self.on_voltage_ratio_change)
-            self.bridge.openWaitForAttachment(5000)
+            self.bridge.openWaitForAttachment(TORQUE_SENSOR_ATTACH_TIMEOUT_MS)
             self.bridge.setDataRate(DATA_RATE)
             self.sensor_state_label.setText("State: Waiting for tare")
         except Exception:
@@ -803,7 +903,7 @@ class MainWindow(QMainWindow):
     def _start_sensor_refresh(self):
         self.sensor_timer = QTimer(self)
         self.sensor_timer.timeout.connect(self.refresh_sensor_labels)
-        self.sensor_timer.start(20)
+        self.sensor_timer.start(SENSOR_REFRESH_INTERVAL_MS)
 
     def eventFilter(self, source, event):
         if (
@@ -1642,7 +1742,7 @@ class MainWindow(QMainWindow):
         GPIO.output(DIR, direction)
         sleep(DIR_SETUP_DELAY_S)
 
-        pulse_delay_s = 0.5 / max(float(frequency_hz), 1.0)
+        pulse_delay_s = 0.5 / max(float(frequency_hz), MIN_STEPPER_FREQUENCY_HZ)
         pulses_sent = 0
         for _ in range(pulse_count):
             if self.stop_requested or self.torque_limit_tripped:
@@ -1653,7 +1753,7 @@ class MainWindow(QMainWindow):
             sleep(pulse_delay_s)
             self.step_counter += 1 if direction == CW else -1
             pulses_sent += 1
-            if self.step_counter % 50 == 0:
+            if self.step_counter % STEP_COUNTER_LABEL_UPDATE_INTERVAL_STEPS == 0:
                 self._update_step_counter_label()
             if process_events:
                 QApplication.processEvents()
@@ -1665,7 +1765,7 @@ class MainWindow(QMainWindow):
         self.set_status("Stepper State: IDLE")
         remaining = seconds
         while remaining > 0 and not self.stop_requested:
-            delay = min(0.05, remaining)
+            delay = min(WAIT_POLL_INTERVAL_S, remaining)
             sleep(delay)
             remaining -= delay
             QApplication.processEvents()
@@ -1969,9 +2069,9 @@ class MainWindow(QMainWindow):
     def _safe_serial_number(self):
         serial_number = self.serial_number_input.text().strip()
         if not serial_number:
-            serial_number = "RoboTuners_Test"
+            serial_number = DEFAULT_SERIAL_NUMBER
         serial_number = re.sub(r"[^A-Za-z0-9_.-]+", "_", serial_number)
-        return serial_number.strip("._-") or "RoboTuners_Test"
+        return serial_number.strip("._-") or DEFAULT_SERIAL_NUMBER
 
     def _ensure_csv_logger(self):
         if self.csv_writer is not None:
@@ -2001,9 +2101,11 @@ class MainWindow(QMainWindow):
     def log_data(self):
         current_time_s = perf_counter()
         log_rate_hz = (
-            self.data_rate_input.value() if self.meaningful_logging_enabled else 1.0
+            self.data_rate_input.value()
+            if self.meaningful_logging_enabled
+            else CSV_BACKGROUND_LOG_RATE_HZ
         )
-        log_interval_s = 1.0 / max(log_rate_hz, 0.1)
+        log_interval_s = 1.0 / max(log_rate_hz, CSV_MIN_LOG_RATE_HZ)
         if current_time_s - self.last_log_time_s < log_interval_s:
             return
 
@@ -2032,7 +2134,7 @@ class MainWindow(QMainWindow):
             ]
         )
         self.last_log_time_s = current_time_s
-        if current_time_s - self.last_csv_flush_s >= 1.0:
+        if current_time_s - self.last_csv_flush_s >= CSV_FLUSH_INTERVAL_S:
             self.csv_file.flush()
             self.last_csv_flush_s = current_time_s
 
