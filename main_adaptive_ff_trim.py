@@ -110,15 +110,39 @@ PID_MAX_PULSES_PER_TICK = 2
 PID_INTEGRAL_LIMIT = 10000.0
 PID_ERROR_DEADBAND_MNM = 10.0
 PID_HYSTERESIS_REENTRY_MNM = PID_ERROR_DEADBAND_MNM
+FF_TO_TRIM_BAND_MNM = 30.0
+FF_PROBE_PULSES = 5
+FF_MIN_CHUNK_PULSES = 2
+FF_MAX_CHUNK_PULSES = 80
+FF_INITIAL_FRACTION = 0.35
+FF_MIN_FRACTION = 0.20
+FF_MAX_FRACTION = 0.85
+FF_FRACTION_STEP_UP = 0.10
+FF_FRACTION_STEP_DOWN = 0.20
+FF_GAIN_ALPHA = 0.30
+FF_DEFAULT_GAIN_MNM_PER_PULSE = 1.0
+FF_MIN_GAIN_MNM_PER_PULSE = 0.05
+FF_SETTLE_TIME_S = 0.15
+FF_PULSE_RATE_HZ = 500.0
+FF_GOOD_PREDICTION_RATIO_MIN = 0.5
+FF_GOOD_PREDICTION_RATIO_MAX = 1.5
+FF_MIN_IMPROVEMENT_MNM = 1.0
 TRIM_ENABLE_ERROR_MNM = 30.0
 TRIM_FLAT_TORQUE_RATE_MNM_PER_S = 25.0
-TRIM_SETTLE_TIME_S = 0.10
+TRIM_MIN_SETTLE_TIME_S = 0.12
+TRIM_MAX_SETTLE_TIME_S = 0.40
+TRIM_STABLE_TORQUE_RATE_MNM_PER_S = 20.0
+TRIM_CROSSING_DWELL_S = 0.10
 TRIM_PULSE_RATE_HZ = 80.0
 TRIM_MIN_WORSENING_MNM = 0.5
 TRIM_MAX_BAD_STEPS = 2
+TRIM_GAIN_ALPHA = 0.3
 ERROR_FILTER_ALPHA = 0.2
-HOLD_REENTRY_BAND_MNM = 10.0
-HOLD_REENTRY_DWELL_S = 0.20
+HOLD_REENTRY_MIN_BAND_MNM = 5.0
+HOLD_REENTRY_MAX_BAND_MNM = 50.0
+HOLD_REENTRY_GAIN_MULTIPLIER = 2.0
+HOLD_SETTLE_GUARD_S = 0.30
+HOLD_REENTRY_DWELL_S = 0.25
 SIMULATED_TORQUE_SLOPE_NM_PER_MOTOR_REV = 40.0
 SIMULATED_TORQUE_TICKS_PER_MNM = 2000.0
 
@@ -318,12 +342,26 @@ class MainWindow(QMainWindow):
         self.pid_step_accumulator = 0.0
         self.pid_commanded_rate_hz = 0.0
         self.pid_hysteresis_active = False
-        self.closed_loop_mode = "approach"
+        self.closed_loop_mode = "feedforward"
+        self.ff_gain_cw_mnm_per_pulse = math.nan
+        self.ff_gain_ccw_mnm_per_pulse = math.nan
+        self.ff_fraction = FF_INITIAL_FRACTION
+        self.ff_waiting_for_settle = False
+        self.ff_last_move_s = None
+        self.ff_start_torque_mnm = math.nan
+        self.ff_start_abs_error_mnm = math.nan
+        self.ff_last_direction = None
+        self.ff_last_pulses = 0
+        self.ff_last_predicted_delta_mnm = math.nan
         self.filtered_error_mnm = math.nan
         self.hold_reentry_started_s = None
+        self.hold_started_s = None
         self.trim_last_pulse_s = None
+        self.trim_crossing_started_s = None
         self.trim_last_error_mnm = math.nan
         self.trim_last_abs_error_mnm = math.nan
+        self.trim_last_torque_mnm = math.nan
+        self.trim_gain_mnm_per_pulse = math.nan
         self.trim_bad_step_count = 0
         self.simulated_output_angle_rev = 0.0
         self.simulated_load_angle_rev = 0.0
@@ -979,12 +1017,18 @@ class MainWindow(QMainWindow):
         self.pid_step_accumulator = 0.0
         self.pid_commanded_rate_hz = 0.0
         self.pid_hysteresis_active = False
-        self.closed_loop_mode = "approach"
+        self.closed_loop_mode = "feedforward"
+        self.ff_fraction = FF_INITIAL_FRACTION
+        self._reset_feedforward_chunk_state()
         self.filtered_error_mnm = math.nan
         self.hold_reentry_started_s = None
+        self.hold_started_s = None
         self.trim_last_pulse_s = None
+        self.trim_crossing_started_s = None
         self.trim_last_error_mnm = math.nan
         self.trim_last_abs_error_mnm = math.nan
+        self.trim_last_torque_mnm = math.nan
+        self.trim_gain_mnm_per_pulse = math.nan
         self.trim_bad_step_count = 0
 
     def _reset_pid_capture_state(self):
@@ -996,9 +1040,80 @@ class MainWindow(QMainWindow):
 
     def _reset_trim_state(self):
         self.trim_last_pulse_s = None
+        self.trim_crossing_started_s = None
         self.trim_last_error_mnm = math.nan
         self.trim_last_abs_error_mnm = math.nan
+        self.trim_last_torque_mnm = math.nan
         self.trim_bad_step_count = 0
+
+    def _enter_hold_mode(self, current_time_s):
+        self.closed_loop_mode = "hold"
+        self._reset_pid_capture_state()
+        self._reset_trim_state()
+        self.hold_started_s = current_time_s
+        self.hold_reentry_started_s = None
+
+    def _hold_reentry_band_mnm(self):
+        if math.isnan(self.trim_gain_mnm_per_pulse):
+            dynamic_band_mnm = HOLD_REENTRY_MIN_BAND_MNM
+        else:
+            dynamic_band_mnm = (
+                HOLD_REENTRY_GAIN_MULTIPLIER * self.trim_gain_mnm_per_pulse
+            )
+        return min(
+            max(dynamic_band_mnm, HOLD_REENTRY_MIN_BAND_MNM),
+            HOLD_REENTRY_MAX_BAND_MNM,
+        )
+
+    def _update_trim_gain(self, gain_mnm_per_pulse):
+        if gain_mnm_per_pulse < FF_MIN_GAIN_MNM_PER_PULSE:
+            return
+        if math.isnan(self.trim_gain_mnm_per_pulse):
+            self.trim_gain_mnm_per_pulse = gain_mnm_per_pulse
+        else:
+            self.trim_gain_mnm_per_pulse = (
+                (1.0 - TRIM_GAIN_ALPHA) * self.trim_gain_mnm_per_pulse
+                + TRIM_GAIN_ALPHA * gain_mnm_per_pulse
+            )
+
+    def _reset_feedforward_chunk_state(self):
+        self.ff_waiting_for_settle = False
+        self.ff_last_move_s = None
+        self.ff_start_torque_mnm = math.nan
+        self.ff_start_abs_error_mnm = math.nan
+        self.ff_last_direction = None
+        self.ff_last_pulses = 0
+        self.ff_last_predicted_delta_mnm = math.nan
+
+    def _get_feedforward_gain(self, direction):
+        gain = (
+            self.ff_gain_cw_mnm_per_pulse
+            if direction == CW
+            else self.ff_gain_ccw_mnm_per_pulse
+        )
+        if math.isnan(gain) or gain < FF_MIN_GAIN_MNM_PER_PULSE:
+            return FF_DEFAULT_GAIN_MNM_PER_PULSE
+        return gain
+
+    def _update_feedforward_gain(self, direction, gain_mnm_per_pulse):
+        if gain_mnm_per_pulse < FF_MIN_GAIN_MNM_PER_PULSE:
+            return
+        if direction == CW:
+            old_gain = self.ff_gain_cw_mnm_per_pulse
+            self.ff_gain_cw_mnm_per_pulse = (
+                gain_mnm_per_pulse
+                if math.isnan(old_gain)
+                else (1.0 - FF_GAIN_ALPHA) * old_gain
+                + FF_GAIN_ALPHA * gain_mnm_per_pulse
+            )
+        else:
+            old_gain = self.ff_gain_ccw_mnm_per_pulse
+            self.ff_gain_ccw_mnm_per_pulse = (
+                gain_mnm_per_pulse
+                if math.isnan(old_gain)
+                else (1.0 - FF_GAIN_ALPHA) * old_gain
+                + FF_GAIN_ALPHA * gain_mnm_per_pulse
+            )
 
     def _process_closed_loop_control(self):
         if not self.closed_loop_enabled:
@@ -1043,7 +1158,15 @@ class MainWindow(QMainWindow):
         self.pid_previous_torque_mnm = current_torque_mnm
 
         if self.closed_loop_mode == "hold":
-            if abs(self.filtered_error_mnm) > HOLD_REENTRY_BAND_MNM:
+            hold_elapsed_s = (
+                current_time_s - self.hold_started_s
+                if self.hold_started_s is not None
+                else math.inf
+            )
+            hold_band_mnm = self._hold_reentry_band_mnm()
+            if hold_elapsed_s < HOLD_SETTLE_GUARD_S:
+                self.hold_reentry_started_s = None
+            elif abs(self.filtered_error_mnm) > hold_band_mnm:
                 if self.hold_reentry_started_s is None:
                     self.hold_reentry_started_s = current_time_s
                 elif (
@@ -1052,88 +1175,205 @@ class MainWindow(QMainWindow):
                 ):
                     self.closed_loop_mode = (
                         "trim"
-                        if abs_error_mnm <= PID_CAPTURE_BAND_MNM
-                        else "approach"
+                        if abs_error_mnm <= FF_TO_TRIM_BAND_MNM
+                        else "feedforward"
                     )
                     self._reset_pid_capture_state()
                     self._reset_trim_state()
+                    self._reset_feedforward_chunk_state()
                     self.hold_reentry_started_s = None
+                    self.hold_started_s = None
             else:
                 self.hold_reentry_started_s = None
             if self.closed_loop_mode == "hold":
                 self.closed_loop_status_label.setText(
                     "Closed-Loop State: Hold "
                     f"({current_torque_mnm:.1f} mN-m, "
-                    f"filtered error {self.filtered_error_mnm:.1f} mN-m)"
+                    f"filtered error {self.filtered_error_mnm:.1f} mN-m, "
+                    f"band {hold_band_mnm:.1f} mN-m)"
                 )
                 self._process_closed_loop_automation(current_time_s)
                 return
 
-        if self.closed_loop_mode == "approach":
-            if abs_error_mnm <= PID_CAPTURE_BAND_MNM:
-                self.closed_loop_mode = "capture"
-                self._reset_pid_capture_state()
-        elif self.closed_loop_mode == "capture":
-            if abs_error_mnm <= TRIM_ENABLE_ERROR_MNM and (
-                abs(torque_derivative_mnm_s) <= TRIM_FLAT_TORQUE_RATE_MNM_PER_S
-            ):
+        if self.closed_loop_mode == "feedforward":
+            if abs_error_mnm <= FF_TO_TRIM_BAND_MNM:
                 self.closed_loop_mode = "trim"
                 self._reset_pid_capture_state()
                 self._reset_trim_state()
-            elif abs_error_mnm >= PID_RELEASE_BAND_MNM:
-                self.closed_loop_mode = "approach"
-                self._reset_pid_capture_state()
-                self._reset_trim_state()
+                self._reset_feedforward_chunk_state()
         elif self.closed_loop_mode == "trim" and abs_error_mnm >= PID_RELEASE_BAND_MNM:
-            self.closed_loop_mode = "approach"
+            self.closed_loop_mode = "feedforward"
             self._reset_pid_capture_state()
             self._reset_trim_state()
+            self._reset_feedforward_chunk_state()
 
-        if self.closed_loop_mode == "approach":
-            direction_sign = 1.0 if error_mnm > 0.0 else -1.0
-            approach_fraction = min(
-                abs_error_mnm / APPROACH_SLOWDOWN_BAND_MNM, 1.0
-            )
-            approach_rate_hz = APPROACH_MIN_STEP_RATE_HZ + approach_fraction * (
-                APPROACH_MAX_STEP_RATE_HZ - APPROACH_MIN_STEP_RATE_HZ
-            )
-            target_rate_hz = direction_sign * approach_rate_hz
+        if self.closed_loop_mode == "feedforward":
             self.pid_integral = 0.0
             self.pid_previous_torque_mnm = math.nan
             self.pid_hysteresis_active = False
+            self.pid_step_accumulator = 0.0
+            self.pid_commanded_rate_hz = 0.0
+
+            if self.ff_waiting_for_settle:
+                if current_time_s - self.ff_last_move_s < FF_SETTLE_TIME_S:
+                    self.closed_loop_status_label.setText(
+                        "Closed-Loop State: Feedforward Settling "
+                        f"({current_torque_mnm:.1f} mN-m, "
+                        f"error {error_mnm:.1f} mN-m)"
+                    )
+                    self._process_closed_loop_automation(current_time_s)
+                    return
+
+                actual_improvement_mnm = self.ff_start_abs_error_mnm - abs_error_mnm
+                if actual_improvement_mnm > FF_MIN_IMPROVEMENT_MNM:
+                    measured_gain = actual_improvement_mnm / max(
+                        self.ff_last_pulses, 1
+                    )
+                    self._update_feedforward_gain(
+                        self.ff_last_direction, measured_gain
+                    )
+                    if (
+                        not math.isnan(self.ff_last_predicted_delta_mnm)
+                        and self.ff_last_predicted_delta_mnm > 0.0
+                    ):
+                        prediction_ratio = (
+                            actual_improvement_mnm
+                            / self.ff_last_predicted_delta_mnm
+                        )
+                        if (
+                            FF_GOOD_PREDICTION_RATIO_MIN
+                            <= prediction_ratio
+                            <= FF_GOOD_PREDICTION_RATIO_MAX
+                        ):
+                            self.ff_fraction = min(
+                                self.ff_fraction + FF_FRACTION_STEP_UP,
+                                FF_MAX_FRACTION,
+                            )
+                        else:
+                            self.ff_fraction = max(
+                                self.ff_fraction - FF_FRACTION_STEP_DOWN,
+                                FF_MIN_FRACTION,
+                            )
+                else:
+                    self.ff_fraction = max(
+                        self.ff_fraction - FF_FRACTION_STEP_DOWN,
+                        FF_MIN_FRACTION,
+                    )
+
+                self._reset_feedforward_chunk_state()
+                if abs_error_mnm <= FF_TO_TRIM_BAND_MNM:
+                    self.closed_loop_mode = "trim"
+                    self._reset_trim_state()
+
+            if self.closed_loop_mode == "feedforward":
+                direction = CW if error_mnm > 0.0 else CCW
+                gain_mnm_per_pulse = self._get_feedforward_gain(direction)
+                estimated_pulses_to_target = abs_error_mnm / gain_mnm_per_pulse
+                if (
+                    (direction == CW and math.isnan(self.ff_gain_cw_mnm_per_pulse))
+                    or (
+                        direction == CCW
+                        and math.isnan(self.ff_gain_ccw_mnm_per_pulse)
+                    )
+                ):
+                    chunk_pulses = FF_PROBE_PULSES
+                else:
+                    chunk_pulses = round(
+                        estimated_pulses_to_target * self.ff_fraction
+                    )
+                    chunk_pulses = max(chunk_pulses, FF_MIN_CHUNK_PULSES)
+                chunk_pulses = min(chunk_pulses, FF_MAX_CHUNK_PULSES)
+
+                direction_text = "CW" if direction == CW else "CCW"
+                self.set_status(f"Stepper State: FF {direction_text}")
+                pulses_sent = self._drive_stepper_pulses(
+                    direction,
+                    chunk_pulses,
+                    FF_PULSE_RATE_HZ,
+                    process_events=False,
+                )
+                if pulses_sent > 0:
+                    self.ff_waiting_for_settle = True
+                    self.ff_last_move_s = current_time_s
+                    self.ff_start_torque_mnm = current_torque_mnm
+                    self.ff_start_abs_error_mnm = abs_error_mnm
+                    self.ff_last_direction = direction
+                    self.ff_last_pulses = pulses_sent
+                    self.ff_last_predicted_delta_mnm = (
+                        gain_mnm_per_pulse * pulses_sent
+                    )
+                self.closed_loop_status_label.setText(
+                    "Closed-Loop State: Feedforward "
+                    f"({current_torque_mnm:.1f} mN-m, "
+                    f"error {error_mnm:.1f} mN-m, "
+                    f"chunk {pulses_sent}/{chunk_pulses}, "
+                    f"fraction {self.ff_fraction:.2f})"
+                )
+                self._process_closed_loop_automation(current_time_s)
+                return
         elif self.closed_loop_mode == "trim":
             self.pid_integral = 0.0
             self.pid_step_accumulator = 0.0
             self.pid_commanded_rate_hz = 0.0
 
             if self.trim_last_pulse_s is None:
-                self.trim_last_pulse_s = current_time_s - TRIM_SETTLE_TIME_S
+                self.trim_last_pulse_s = current_time_s - TRIM_MAX_SETTLE_TIME_S
                 self.trim_last_error_mnm = error_mnm
                 self.trim_last_abs_error_mnm = abs_error_mnm
+                self.trim_last_torque_mnm = current_torque_mnm
 
+            trim_elapsed_s = current_time_s - self.trim_last_pulse_s
+            trim_stable = (
+                trim_elapsed_s >= TRIM_MIN_SETTLE_TIME_S
+                and abs(torque_derivative_mnm_s)
+                <= TRIM_STABLE_TORQUE_RATE_MNM_PER_S
+            )
+            trim_timed_out = trim_elapsed_s >= TRIM_MAX_SETTLE_TIME_S
             if (
                 not math.isnan(self.trim_last_error_mnm)
                 and error_mnm * self.trim_last_error_mnm <= 0.0
             ):
-                self.closed_loop_mode = "hold"
-                self._reset_pid_capture_state()
-                self._reset_trim_state()
-                self.hold_reentry_started_s = None
+                if trim_stable or trim_timed_out:
+                    if self.trim_crossing_started_s is None:
+                        self.trim_crossing_started_s = current_time_s
+                    elif (
+                        current_time_s - self.trim_crossing_started_s
+                        >= TRIM_CROSSING_DWELL_S
+                    ):
+                        if not math.isnan(self.trim_last_torque_mnm):
+                            self._update_trim_gain(
+                                abs(current_torque_mnm - self.trim_last_torque_mnm)
+                            )
+                        self._enter_hold_mode(current_time_s)
+                        self.closed_loop_status_label.setText(
+                            "Closed-Loop State: Hold "
+                            f"({current_torque_mnm:.1f} mN-m, crossed reference)"
+                        )
+                        self._process_closed_loop_automation(current_time_s)
+                        return
                 self.closed_loop_status_label.setText(
-                    "Closed-Loop State: Hold "
-                    f"({current_torque_mnm:.1f} mN-m, crossed reference)"
-                )
-                self._process_closed_loop_automation(current_time_s)
-                return
-
-            if current_time_s - self.trim_last_pulse_s < TRIM_SETTLE_TIME_S:
-                self.closed_loop_status_label.setText(
-                    "Closed-Loop State: Trim Settling "
+                    "Closed-Loop State: Trim Crossing "
                     f"({current_torque_mnm:.1f} mN-m, "
                     f"error {error_mnm:.1f} mN-m)"
                 )
                 self._process_closed_loop_automation(current_time_s)
                 return
+            self.trim_crossing_started_s = None
+
+            if not trim_stable and not trim_timed_out:
+                self.closed_loop_status_label.setText(
+                    "Closed-Loop State: Trim Settling "
+                    f"({current_torque_mnm:.1f} mN-m, "
+                    f"error {error_mnm:.1f} mN-m, "
+                    f"slope {torque_derivative_mnm_s:.1f} mN-m/s)"
+                )
+                self._process_closed_loop_automation(current_time_s)
+                return
+
+            if not math.isnan(self.trim_last_torque_mnm):
+                self._update_trim_gain(
+                    abs(current_torque_mnm - self.trim_last_torque_mnm)
+                )
 
             if (
                 not math.isnan(self.trim_last_abs_error_mnm)
@@ -1145,10 +1385,7 @@ class MainWindow(QMainWindow):
                 self.trim_bad_step_count = 0
 
             if self.trim_bad_step_count >= TRIM_MAX_BAD_STEPS:
-                self.closed_loop_mode = "hold"
-                self._reset_pid_capture_state()
-                self._reset_trim_state()
-                self.hold_reentry_started_s = None
+                self._enter_hold_mode(current_time_s)
                 self.closed_loop_status_label.setText(
                     "Closed-Loop State: Hold "
                     f"({current_torque_mnm:.1f} mN-m, trim stopped)"
@@ -1169,6 +1406,8 @@ class MainWindow(QMainWindow):
                 self.trim_last_pulse_s = current_time_s
                 self.trim_last_error_mnm = error_mnm
                 self.trim_last_abs_error_mnm = abs_error_mnm
+                self.trim_last_torque_mnm = current_torque_mnm
+                self.trim_crossing_started_s = None
             self.closed_loop_status_label.setText(
                 "Closed-Loop State: Trim "
                 f"({current_torque_mnm:.1f} mN-m, "
