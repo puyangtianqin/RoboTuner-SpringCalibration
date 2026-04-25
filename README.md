@@ -4,16 +4,16 @@ This directory contains Python scripts for running and analyzing the RoboTuner s
 
 ## Main Files
 
-- `main_adaptive_ff_trim.py` - current main control script for the RoboTuner calibration GUI.
+- `main_adaptive_ff_trim.py` - current main control script for the RoboTuner calibration GUI (PyQt5, with adaptive feed-forward trim and Phidget torque / Raspberry Pi stepper integration).
 - `GUI_Test.py` - GUI test/development script.
-- `plot.py` - plotting script for CSV data stored in `Results/`.
+- `plot.py` - interactive PyQt5 plotting GUI for CSV data stored in `Results/`.
 - `.gitignore` - ignores Python cache files such as `__pycache__/` and `*.pyc`.
 
 ## Folders
 
-- `Results/` - exported CSV files from calibration runs.
-- `Past_Versions/` - archived versions of older main scripts.
-- `Unit_Tests/` - smaller test/helper scripts for sensors, stepper motion, and automation.
+- `Results/` - exported CSV files from calibration runs (`RoboTuners_Test_*.csv` from the active control GUI, `torque_deflection_*.csv` from earlier sweeps).
+- `Past_Versions/` - archived versions of older main scripts (`main.py`, dated backups).
+- `Unit_Tests/` - smaller test/helper scripts for sensors, stepper motion, and automation (`spring_encoder.py`, `stepper_test.py`, `stepper_automation.py`, `torque_sensor.py`).
 
 ## Running the Main Script
 
@@ -31,17 +31,20 @@ Results/
 
 ## Plotting Data
 
-`plot.py` currently loads a specific CSV file from `Results/`. To plot a different run, edit the filename in:
-
-```python
-file_path = RESULTS_DIR / "RoboTuners_Test_20260420_160532.csv"
-```
-
-Then run:
+`plot.py` opens an interactive PyQt5 viewer for any CSV in `Results/`. Launch it with:
 
 ```powershell
 python plot.py
 ```
+
+Then use the GUI to:
+
+- Pick a CSV from the **CSV file** dropdown (auto-populated from `Results/*.csv`).
+- Adjust the **Analysis** window (start/end seconds) via the spin boxes or range slider on the *Reference Selection* tab.
+- Adjust the **Reference** window — used to compute `ref_encoder` (mean of `encoder_raw` over the window) for the delta-encoder calculation. Click **Default Ref** to snap to the first `DEFAULT_REF_WINDOW_S` seconds of meaningful logging.
+- Switch to the **Analysis Plots** tab for delta-encoder, torque, ratio, and torque-vs-delta-encoder views.
+
+Plots auto-refresh on a timer (`AUTO_REFRESH_INTERVAL_MS`, default 1 s) when controls or the selected file change. Expected CSV columns: `time_s`, `encoder_raw`, `torque_mnm`, and optionally `meaningful_logging`.
 
 ## Notes
 

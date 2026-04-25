@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -203,6 +204,8 @@ WAIT_POLL_INTERVAL_S = 0.05
 DEFAULT_SERIAL_NUMBER = "RoboTuners_Test"
 RESULTS_DIR = Path(__file__).resolve().parent / "Results"
 RESULTS_DIR.mkdir(exist_ok=True)
+STEP_MEMORY_FILENAME = "step_counter_memory.csv"
+RESET_COUNTER_PASSWORD = "roboligent"
 CSV_BACKGROUND_LOG_RATE_HZ = 1.0
 CSV_MIN_LOG_RATE_HZ = 0.1
 CSV_FLUSH_INTERVAL_S = 1.0
@@ -220,7 +223,7 @@ DATA_RATE_INPUT_MIN_HZ = 0.1
 DATA_RATE_INPUT_MAX_HZ = 1000.0
 DATA_RATE_INPUT_STEP_HZ = 1.0
 DATA_RATE_INPUT_DECIMALS = 1
-DATA_RATE_INPUT_DEFAULT_HZ = 10.0
+DATA_RATE_INPUT_DEFAULT_HZ = 50.0
 MANUAL_REV_MIN = -1.0
 MANUAL_REV_MAX = 1.0
 MANUAL_REV_STEP = 0.01
@@ -388,7 +391,7 @@ class MainWindow(QMainWindow):
         self.resize(APP_WINDOW_WIDTH, APP_WINDOW_HEIGHT)
         self.stop_requested = False
         self.emergency_stop_enabled = False
-        self.step_counter = 0
+        self.step_counter = self._load_step_counter_memory()
         self.actuation_frequency_hz = DEFAULT_ACTUATION_FREQUENCY_HZ
         self.active_tab_index = 0
         self.closed_loop_lock_active = False
@@ -1984,6 +1987,7 @@ class MainWindow(QMainWindow):
         self.emergency_stop_enabled = checked
         if not checked:
             self.request_stop()
+            self._append_step_counter_memory("e_brake_disabled")
         elif self.torque_limit_tripped:
             self.torque_limit_tripped = False
         if not checked and self.closed_loop_enabled:
@@ -2015,12 +2019,34 @@ class MainWindow(QMainWindow):
             )
 
     def reset_step_counter(self):
+        password, accepted = QInputDialog.getText(
+            self,
+            "Confirm Counter Reset",
+            (
+                "Resetting the counter changes the saved zero position.\n\n"
+                "This cannot be undone by closing the program. Recovery requires "
+                "editing the saved backend memory file or manually recalibrating.\n\n"
+                f"Type {RESET_COUNTER_PASSWORD} to reset the counter:"
+            ),
+            QLineEdit.Password,
+        )
+        if not accepted:
+            return
+        if password != RESET_COUNTER_PASSWORD:
+            QMessageBox.warning(
+                self,
+                "Reset Cancelled",
+                "Incorrect password. Step counter was not reset.",
+            )
+            return
+
         self.step_counter = 0
         if self.encoder_available and not math.isnan(self.encoder_raw):
             self.encoder_zero_raw = float(self.encoder_raw)
         else:
             self.encoder_zero_raw = math.nan
         self._update_step_counter_label()
+        self._append_step_counter_memory("step_counter_reset")
 
     def return_to_zero(self):
         if not self.emergency_stop_enabled:
@@ -2042,6 +2068,58 @@ class MainWindow(QMainWindow):
 
     def _update_step_counter_label(self):
         self.step_counter_label.setText(f"Step Counter: {self.step_counter} step")
+
+    def _step_memory_path(self):
+        return RESULTS_DIR / STEP_MEMORY_FILENAME
+
+    def _load_step_counter_memory(self):
+        memory_path = self._step_memory_path()
+        if not memory_path.exists():
+            return 0
+
+        last_step_counter = 0
+        try:
+            with open(memory_path, "r", newline="") as memory_file:
+                for row in csv.DictReader(memory_file):
+                    step_counter = row.get("step_counter")
+                    if step_counter in (None, ""):
+                        continue
+                    last_step_counter = int(float(step_counter))
+        except Exception:
+            return 0
+        return last_step_counter
+
+    def _append_step_counter_memory(self, event_name):
+        memory_path = self._step_memory_path()
+        file_exists = memory_path.exists()
+        fieldnames = [
+            "timestamp",
+            "elapsed_s",
+            "event",
+            "serial_number",
+            "step_counter",
+            "encoder_raw",
+            "encoder_filtered",
+        ]
+
+        try:
+            with open(memory_path, "a", newline="") as memory_file:
+                writer = csv.DictWriter(memory_file, fieldnames=fieldnames)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(
+                    {
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "elapsed_s": f"{perf_counter() - self.start_time_s:.6f}",
+                        "event": event_name,
+                        "serial_number": self._safe_serial_number(),
+                        "step_counter": self.step_counter,
+                        "encoder_raw": self.encoder_raw,
+                        "encoder_filtered": self.encoder_filtered,
+                    }
+                )
+        except Exception as exc:
+            self.set_status(f"Stepper State: STEP MEMORY LOG FAILED ({exc})")
 
     def on_tab_changed(self, index):
         if self.closed_loop_lock_active and index not in (
@@ -2143,6 +2221,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.stop_manual_calibration_move()
+        self._append_step_counter_memory("gui_closed")
         if self.bridge is not None:
             try:
                 self.bridge.close()
