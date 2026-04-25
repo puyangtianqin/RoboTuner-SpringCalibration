@@ -1,9 +1,11 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 # Load data
-file_path = "RoboTuners_Test_20260420_160532.csv"
+RESULTS_DIR = Path(__file__).resolve().parent / "Results"
+file_path = RESULTS_DIR / "RoboTuners_Test_20260420_160532.csv"
 df = pd.read_csv(file_path)
 
 # --- Truncate to 125 seconds ---

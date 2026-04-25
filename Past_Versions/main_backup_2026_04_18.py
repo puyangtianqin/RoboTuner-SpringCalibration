@@ -79,6 +79,8 @@ OPEN_LOOP_RATE_SCALE = (
     STEPPER_DRIVER_PULSES_PER_REV / BASE_STEPPER_DRIVER_PULSES_PER_REV
 )
 PULSES_PER_REV = STEPPER_DRIVER_PULSES_PER_REV
+STEPPER_OUTPUT_DEG_PER_PULSE = 360.0 / STEPPER_DRIVER_PULSES_PER_REV
+STEP_DELAY_S = 0.005
 DEFAULT_ACTUATION_FREQUENCY_HZ = 100.0 * OPEN_LOOP_RATE_SCALE
 RETURN_FREQUENCY_HZ = 50.0 * OPEN_LOOP_RATE_SCALE
 CALIBRATION_START_FREQUENCY_HZ = 1.0 * OPEN_LOOP_RATE_SCALE
@@ -93,84 +95,33 @@ NAN_TEXT = "nan"
 DISPLAY_TORQUE_SCALE = 1000.0
 DEFAULT_TORQUE_LIMIT_MNM = 10000.0
 CLOSED_LOOP_REFERENCE_MAX_OFFSET_MNM = 10000.0
-
-# Closed-loop controller tuning map:
-# - "feedforward" sends estimated pulse chunks while far from the reference.
-# - "trim" sends one pulse at a time after feedforward chunks become too small.
-# - "hold" stops actuation and waits for filtered error to leave a dynamic band.
-# Units use mNm for torque error, Hz for pulse rates, and seconds for dwell/settle.
-CLOSED_LOOP_CONTROL_INTERVAL_MS = 20
-
-# Feedforward-to-trim handoff.
-# The torque band is a safety fallback. The chunk-pulse threshold is the main
-# dynamic handoff: when the next fractional feedforward estimate is this small,
-# trim takes over because pulse-by-pulse control is more useful than another chunk.
-FF_TO_TRIM_BAND_MNM = 30.0
-FF_TO_TRIM_CHUNK_PULSES = 8
-
-# Adaptive feedforward chunking.
-# Probe pulses are used before a direction-specific torque-per-pulse gain is known.
-# Chunk limits cap each open-loop burst. Fraction values set what portion of the
-# estimated remaining distance is attempted each burst; higher is faster but riskier.
-FF_PROBE_PULSES = 5
-FF_MIN_CHUNK_PULSES = 2
-FF_MAX_CHUNK_PULSES = 80
-FF_INITIAL_FRACTION = 0.35
-FF_MIN_FRACTION = 0.20
-FF_MAX_FRACTION = 0.85
-FF_FRACTION_STEP_UP = 0.10
-FF_FRACTION_STEP_DOWN = 0.20
-
-# Feedforward gain learning and settling.
-# Gain alpha controls smoothing of the learned mNm/pulse relation. Increase for
-# faster adaptation; decrease for less noise sensitivity. Settle time should cover
-# the fast spring response after a chunk before judging improvement.
-FF_GAIN_ALPHA = 0.30
-FF_DEFAULT_GAIN_MNM_PER_PULSE = 1.0
-FF_MIN_GAIN_MNM_PER_PULSE = 0.05
-FF_SETTLE_TIME_S = 0.15
-FF_PULSE_RATE_HZ = 500.0
-
-# Feedforward quality checks.
-# If actual improvement is close to prediction, the fraction is allowed to grow.
-# If improvement is poor or prediction is off, the fraction is reduced.
-FF_GOOD_PREDICTION_RATIO_MIN = 0.5
-FF_GOOD_PREDICTION_RATIO_MAX = 1.5
-FF_MIN_IMPROVEMENT_MNM = 1.0
-
-# Digital trim entry and settle detection.
-# Trim sends one pulse, waits for torque to settle or timeout, then compares error.
-# If trim error becomes large again, release back to feedforward. Increase the
-# stable slope threshold if the torque trace is noisy; decrease it if trim reacts
-# before the spring response has finished.
-TRIM_RELEASE_TO_FF_BAND_MNM = 100.0
-TRIM_MIN_SETTLE_TIME_S = 0.12
-TRIM_MAX_SETTLE_TIME_S = 0.40
-TRIM_STABLE_TORQUE_RATE_MNM_PER_S = 20.0
-
-# Trim stop and safety behavior.
-# Crossing dwell requires the error to remain across/near zero before hold.
-# Raise bad-step tolerance if single pulses sometimes look worse due to noise.
-TRIM_CROSSING_DWELL_S = 0.10
+PID_CONTROL_INTERVAL_MS = 20
+PID_KP = 0.5
+PID_KI = 0.2
+PID_KD = 0.0008
+PID_MAX_STEP_RATE_HZ = 220.0
+PID_MAX_RATE_CHANGE_HZ_PER_S = 600.0
+PID_CAPTURE_BAND_MNM = 50.0
+PID_RELEASE_BAND_MNM = 100.0
+APPROACH_MIN_STEP_RATE_HZ = 20.0
+APPROACH_MAX_STEP_RATE_HZ = 500.0
+APPROACH_SLOWDOWN_BAND_MNM = 300.0
+PID_PULSE_OUTPUT_FREQUENCY_HZ = 500.0
+PID_MAX_PULSES_PER_TICK = 2
+PID_INTEGRAL_LIMIT = 10000.0
+PID_ERROR_DEADBAND_MNM = 10.0
+PID_HYSTERESIS_REENTRY_MNM = PID_ERROR_DEADBAND_MNM
+TRIM_ENABLE_ERROR_MNM = 30.0
+TRIM_FLAT_TORQUE_RATE_MNM_PER_S = 25.0
+TRIM_SETTLE_TIME_S = 0.10
 TRIM_PULSE_RATE_HZ = 80.0
 TRIM_MIN_WORSENING_MNM = 0.5
 TRIM_MAX_BAD_STEPS = 2
-TRIM_GAIN_ALPHA = 0.3
-
-# Filtered error for hold re-entry.
-# Higher alpha follows real changes faster but admits more noise. Lower alpha is
-# calmer but delays re-entry after drift.
 ERROR_FILTER_ALPHA = 0.2
-
-# Dynamic hold re-entry band.
-# Hold band is based on local trim gain: about one or two trim pulses of torque,
-# then clamped by min/max. Larger multiplier or max band reduces nuisance re-entry;
-# smaller values keep the controller tighter around the reference.
-HOLD_REENTRY_MIN_BAND_MNM = 5.0
-HOLD_REENTRY_MAX_BAND_MNM = 50.0
-HOLD_REENTRY_GAIN_MULTIPLIER = 2.0
-HOLD_SETTLE_GUARD_S = 0.30
-HOLD_REENTRY_DWELL_S = 0.25
+HOLD_REENTRY_BAND_MNM = 10.0
+HOLD_REENTRY_DWELL_S = 0.20
+SIMULATED_TORQUE_SLOPE_NM_PER_MOTOR_REV = 40.0
+SIMULATED_TORQUE_TICKS_PER_MNM = 2000.0
 
 ENCODER_ENABLED = True
 ENCODER_CLK = 11
@@ -178,84 +129,26 @@ ENCODER_MISO = 9
 ENCODER_CS = 8
 ENCODER_ALPHA = 0.1
 ENCODER_FRAME_BITS = 24
+ENCODER_DATA_BITS = 18
 ENCODER_STATUS_BITS = 6
 ENCODER_DATA_MASK = 0x3FFFF
 ENCODER_STATUS_MASK = 0x3F
 ENCODER_WAKE_DELAY_S = 0.000005
 ENCODER_COUNTS_PER_REV = ENCODER_DATA_MASK + 1
+GEAR_REDUCTION_RATIO = 50.0
+SIMULATED_ENCODER_DC_BIAS_TICKS = 300000.0
+SIMULATED_SPRING_STIFFNESS_MNM_PER_OUTPUT_REV = (
+    SIMULATED_TORQUE_SLOPE_NM_PER_MOTOR_REV
+    * DISPLAY_TORQUE_SCALE
+    * GEAR_REDUCTION_RATIO
+    * 1.8
+)
+SIMULATED_SPRING_DAMPING_MNM_PER_OUTPUT_REV_PER_S = 960000.0
+SIMULATED_TRANSIENT_TIME_CONSTANT_S = 0.6
 
-# UI and logging configuration.
-APP_TITLE = "Senior Design"
-APP_WINDOW_WIDTH = 1000
-APP_WINDOW_HEIGHT = 600
-SIDE_PANEL_WIDTH = 240
-INPUT_WIDTH = 120
-PRIMARY_BUTTON_HEIGHT = 40
-SMALL_BUTTON_HEIGHT = 32
-LOGGING_BUTTON_HEIGHT = 36
 PLOT_HISTORY = 200
-PLOT_MIN_HEIGHT = 120
-SENSOR_REFRESH_INTERVAL_MS = 20
-TORQUE_SENSOR_ATTACH_TIMEOUT_MS = 5000
-STEP_COUNTER_LABEL_UPDATE_INTERVAL_STEPS = 50
-MIN_STEPPER_FREQUENCY_HZ = 1.0
-WAIT_POLL_INTERVAL_S = 0.05
-DEFAULT_SERIAL_NUMBER = "RoboTuners_Test"
-RESULTS_DIR = Path(__file__).resolve().parent / "Results"
+RESULTS_DIR = Path(__file__).resolve().parent.parent / "Results"
 RESULTS_DIR.mkdir(exist_ok=True)
-CSV_BACKGROUND_LOG_RATE_HZ = 1.0
-CSV_MIN_LOG_RATE_HZ = 0.1
-CSV_FLUSH_INTERVAL_S = 1.0
-
-# UI input ranges and defaults.
-ACTUATION_FREQUENCY_MIN_HZ = 1.0
-ACTUATION_FREQUENCY_MAX_HZ = 10000.0
-ACTUATION_FREQUENCY_STEP_HZ = 50.0
-ACTUATION_FREQUENCY_DECIMALS = 1
-TORQUE_LIMIT_INPUT_MIN_MNM = 1.0
-TORQUE_LIMIT_INPUT_MAX_MNM = 1_000_000.0
-TORQUE_LIMIT_INPUT_STEP_MNM = 100.0
-TORQUE_LIMIT_INPUT_DECIMALS = 1
-DATA_RATE_INPUT_MIN_HZ = 0.1
-DATA_RATE_INPUT_MAX_HZ = 1000.0
-DATA_RATE_INPUT_STEP_HZ = 1.0
-DATA_RATE_INPUT_DECIMALS = 1
-DATA_RATE_INPUT_DEFAULT_HZ = 10.0
-MANUAL_REV_MIN = -1.0
-MANUAL_REV_MAX = 1.0
-MANUAL_REV_STEP = 0.01
-MANUAL_REV_DECIMALS = 3
-AUTO_STEP_REV_MIN = 0.001
-AUTO_STEP_REV_MAX = 1.0
-AUTO_STEP_REV_STEP = 0.01
-AUTO_STEP_REV_DECIMALS = 3
-AUTO_STEP_REV_DEFAULT = 0.10
-AUTO_POINT_COUNT_MIN = 1
-AUTO_POINT_COUNT_MAX = 1000
-AUTO_POINT_COUNT_DEFAULT = 10
-AUTO_PAUSE_MIN_S = 0.0
-AUTO_PAUSE_MAX_S = 3600.0
-AUTO_PAUSE_STEP_S = 0.5
-AUTO_PAUSE_DECIMALS = 1
-AUTO_PAUSE_DEFAULT_S = 2.0
-CLOSED_LOOP_TARGET_MIN_MNM = -1_000_000.0
-CLOSED_LOOP_TARGET_MAX_MNM = 1_000_000.0
-CLOSED_LOOP_TARGET_STEP_MNM = 100.0
-CLOSED_LOOP_TARGET_DECIMALS = 2
-CLOSED_LOOP_TARGET_DEFAULT_MNM = 0.0
-CLOSED_LOOP_AUTOMATION_BOUND_MIN_MNM = 0.1
-CLOSED_LOOP_AUTOMATION_BOUND_MAX_MNM = 1_000_000.0
-CLOSED_LOOP_AUTOMATION_BOUND_STEP_MNM = 100.0
-CLOSED_LOOP_AUTOMATION_BOUND_DECIMALS = 2
-CLOSED_LOOP_AUTOMATION_BOUND_DEFAULT_MNM = 1000.0
-CLOSED_LOOP_AUTOMATION_POINT_COUNT_MIN = 1
-CLOSED_LOOP_AUTOMATION_POINT_COUNT_MAX = 1000
-CLOSED_LOOP_AUTOMATION_POINT_COUNT_DEFAULT = 10
-CLOSED_LOOP_AUTOMATION_PAUSE_MIN_S = 0.0
-CLOSED_LOOP_AUTOMATION_PAUSE_MAX_S = 3600.0
-CLOSED_LOOP_AUTOMATION_PAUSE_STEP_S = 0.5
-CLOSED_LOOP_AUTOMATION_PAUSE_DECIMALS = 1
-CLOSED_LOOP_AUTOMATION_PAUSE_DEFAULT_S = 2.0
 
 
 class WaveformWidget(QWidget):
@@ -268,7 +161,7 @@ class WaveformWidget(QWidget):
         self.reference_visible = False
         self.reference_pen = QPen(QColor("#1d4ed8"), 2, Qt.DashLine)
         self.reference_samples = deque(maxlen=PLOT_HISTORY)
-        self.setMinimumHeight(PLOT_MIN_HEIGHT)
+        self.setMinimumHeight(120)
 
     def update_samples(self, samples):
         if self.paused:
@@ -384,8 +277,8 @@ class WaveformWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_TITLE)
-        self.resize(APP_WINDOW_WIDTH, APP_WINDOW_HEIGHT)
+        self.setWindowTitle("Senior Design")
+        self.resize(1000, 600)
         self.stop_requested = False
         self.emergency_stop_enabled = False
         self.step_counter = 0
@@ -422,29 +315,24 @@ class MainWindow(QMainWindow):
         self.calibration_hold_start_s = None
         self.calibration_last_update_s = None
         self.calibration_step_accumulator = 0.0
-        self.previous_torque_mnm = math.nan
-        self.closed_loop_last_update_s = perf_counter()
-        self.closed_loop_mode = "feedforward"
-        self.ff_gain_cw_mnm_per_pulse = math.nan
-        self.ff_gain_ccw_mnm_per_pulse = math.nan
-        self.ff_fraction = FF_INITIAL_FRACTION
-        self.ff_waiting_for_settle = False
-        self.ff_last_move_s = None
-        self.ff_start_torque_mnm = math.nan
-        self.ff_start_abs_error_mnm = math.nan
-        self.ff_last_direction = None
-        self.ff_last_pulses = 0
-        self.ff_last_predicted_delta_mnm = math.nan
+        self.pid_integral = 0.0
+        self.pid_previous_torque_mnm = math.nan
+        self.pid_last_update_s = perf_counter()
+        self.pid_step_accumulator = 0.0
+        self.pid_commanded_rate_hz = 0.0
+        self.pid_hysteresis_active = False
+        self.closed_loop_mode = "approach"
         self.filtered_error_mnm = math.nan
         self.hold_reentry_started_s = None
-        self.hold_started_s = None
         self.trim_last_pulse_s = None
-        self.trim_crossing_started_s = None
         self.trim_last_error_mnm = math.nan
         self.trim_last_abs_error_mnm = math.nan
-        self.trim_last_torque_mnm = math.nan
-        self.trim_gain_mnm_per_pulse = math.nan
         self.trim_bad_step_count = 0
+        self.simulated_output_angle_rev = 0.0
+        self.simulated_load_angle_rev = 0.0
+        self.simulated_deflection_rev = 0.0
+        self.simulated_transient_torque_mnm = 0.0
+        self.last_simulated_plant_update_s = perf_counter()
         self.torque_history = deque([math.nan], maxlen=PLOT_HISTORY)
         self.reference_torque_history = deque([math.nan], maxlen=PLOT_HISTORY)
         self.torque_error_history = deque([math.nan], maxlen=PLOT_HISTORY)
@@ -464,18 +352,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         action_panel = QWidget()
-        action_panel.setFixedWidth(SIDE_PANEL_WIDTH)
+        action_panel.setFixedWidth(240)
         action_layout = QVBoxLayout(action_panel)
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(8)
 
         self.brake_button = QPushButton("Brake")
-        self.brake_button.setFixedHeight(PRIMARY_BUTTON_HEIGHT)
+        self.brake_button.setFixedHeight(40)
         self.brake_button.clicked.connect(self.request_stop)
         action_layout.addWidget(self.brake_button)
 
         self.emergency_stop_button = QPushButton("Stepper Disabled")
-        self.emergency_stop_button.setFixedHeight(PRIMARY_BUTTON_HEIGHT)
+        self.emergency_stop_button.setFixedHeight(40)
         self.emergency_stop_button.setCheckable(True)
         self.emergency_stop_button.toggled.connect(self.on_emergency_stop_toggled)
         action_layout.addWidget(self.emergency_stop_button)
@@ -488,12 +376,12 @@ class MainWindow(QMainWindow):
         counter_button_row.setSpacing(8)
 
         self.reset_counter_button = QPushButton("Reset Counter")
-        self.reset_counter_button.setFixedHeight(SMALL_BUTTON_HEIGHT)
+        self.reset_counter_button.setFixedHeight(32)
         self.reset_counter_button.clicked.connect(self.reset_step_counter)
         counter_button_row.addWidget(self.reset_counter_button)
 
         self.return_to_zero_button = QPushButton("Return to Zero")
-        self.return_to_zero_button.setFixedHeight(SMALL_BUTTON_HEIGHT)
+        self.return_to_zero_button.setFixedHeight(32)
         self.return_to_zero_button.clicked.connect(self.return_to_zero)
         counter_button_row.addWidget(self.return_to_zero_button)
 
@@ -507,12 +395,10 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(speed_label)
 
         self.actuation_frequency_input = QDoubleSpinBox()
-        self.actuation_frequency_input.setFixedWidth(INPUT_WIDTH)
-        self.actuation_frequency_input.setRange(
-            ACTUATION_FREQUENCY_MIN_HZ, ACTUATION_FREQUENCY_MAX_HZ
-        )
-        self.actuation_frequency_input.setSingleStep(ACTUATION_FREQUENCY_STEP_HZ)
-        self.actuation_frequency_input.setDecimals(ACTUATION_FREQUENCY_DECIMALS)
+        self.actuation_frequency_input.setFixedWidth(120)
+        self.actuation_frequency_input.setRange(1.0, 10000.0)
+        self.actuation_frequency_input.setSingleStep(50.0)
+        self.actuation_frequency_input.setDecimals(1)
         self.actuation_frequency_input.setValue(self.actuation_frequency_hz)
         self.actuation_frequency_input.valueChanged.connect(
             self.on_actuation_frequency_changed
@@ -523,18 +409,16 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(torque_limit_label)
 
         self.torque_limit_input = QDoubleSpinBox()
-        self.torque_limit_input.setFixedWidth(INPUT_WIDTH)
-        self.torque_limit_input.setRange(
-            TORQUE_LIMIT_INPUT_MIN_MNM, TORQUE_LIMIT_INPUT_MAX_MNM
-        )
-        self.torque_limit_input.setSingleStep(TORQUE_LIMIT_INPUT_STEP_MNM)
-        self.torque_limit_input.setDecimals(TORQUE_LIMIT_INPUT_DECIMALS)
+        self.torque_limit_input.setFixedWidth(120)
+        self.torque_limit_input.setRange(1.0, 1_000_000.0)
+        self.torque_limit_input.setSingleStep(100.0)
+        self.torque_limit_input.setDecimals(1)
         self.torque_limit_input.setValue(self.torque_limit_mnm)
         self.torque_limit_input.valueChanged.connect(self.on_torque_limit_changed)
         action_layout.addWidget(self.torque_limit_input)
 
         self.meaningful_logging_button = QPushButton("Meaningful Logging: OFF")
-        self.meaningful_logging_button.setFixedHeight(LOGGING_BUTTON_HEIGHT)
+        self.meaningful_logging_button.setFixedHeight(36)
         self.meaningful_logging_button.setCheckable(True)
         self.meaningful_logging_button.toggled.connect(
             self.on_meaningful_logging_toggled
@@ -550,19 +434,19 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(data_rate_label)
 
         self.data_rate_input = QDoubleSpinBox()
-        self.data_rate_input.setFixedWidth(INPUT_WIDTH)
-        self.data_rate_input.setRange(DATA_RATE_INPUT_MIN_HZ, DATA_RATE_INPUT_MAX_HZ)
-        self.data_rate_input.setSingleStep(DATA_RATE_INPUT_STEP_HZ)
-        self.data_rate_input.setDecimals(DATA_RATE_INPUT_DECIMALS)
-        self.data_rate_input.setValue(DATA_RATE_INPUT_DEFAULT_HZ)
+        self.data_rate_input.setFixedWidth(120)
+        self.data_rate_input.setRange(0.1, 1000.0)
+        self.data_rate_input.setSingleStep(1.0)
+        self.data_rate_input.setDecimals(1)
+        self.data_rate_input.setValue(10.0)
         action_layout.addWidget(self.data_rate_input)
 
         serial_number_label = QLabel("Unique Serial Number")
         action_layout.addWidget(serial_number_label)
 
         self.serial_number_input = QLineEdit()
-        self.serial_number_input.setFixedWidth(INPUT_WIDTH)
-        self.serial_number_input.setText(DEFAULT_SERIAL_NUMBER)
+        self.serial_number_input.setFixedWidth(120)
+        self.serial_number_input.setText("RoboTuners_Test")
         self.serial_number_input.setPlaceholderText("Enter serial number")
         # Keep this field in the GUI test harness for now. When this UI is moved
         # into the main file, use the entered serial number to help name the CSV.
@@ -576,7 +460,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.tabs, 2)
 
         self.sensor_panel = QWidget()
-        self.sensor_panel.setFixedWidth(SIDE_PANEL_WIDTH)
+        self.sensor_panel.setFixedWidth(240)
         root_layout.addWidget(self.sensor_panel, 1)
 
         self.manual_tab = QWidget()
@@ -616,9 +500,9 @@ class MainWindow(QMainWindow):
         ).setGeometry(40, 40, 260, 30)
 
         self.manual_rev_input = QDoubleSpinBox(self.manual_tab)
-        self.manual_rev_input.setRange(MANUAL_REV_MIN, MANUAL_REV_MAX)
-        self.manual_rev_input.setSingleStep(MANUAL_REV_STEP)
-        self.manual_rev_input.setDecimals(MANUAL_REV_DECIMALS)
+        self.manual_rev_input.setRange(-1.0, 1.0)
+        self.manual_rev_input.setSingleStep(0.01)
+        self.manual_rev_input.setDecimals(3)
         self.manual_rev_input.setGeometry(40, 75, 120, 35)
 
         self.manual_actuation_button = QPushButton("Actuation Cmd", self.manual_tab)
@@ -644,30 +528,28 @@ class MainWindow(QMainWindow):
             40, 40, 180, 30
         )
         self.auto_step_rev_input = QDoubleSpinBox(self.automation_tab)
-        self.auto_step_rev_input.setRange(AUTO_STEP_REV_MIN, AUTO_STEP_REV_MAX)
-        self.auto_step_rev_input.setSingleStep(AUTO_STEP_REV_STEP)
-        self.auto_step_rev_input.setDecimals(AUTO_STEP_REV_DECIMALS)
-        self.auto_step_rev_input.setValue(AUTO_STEP_REV_DEFAULT)
+        self.auto_step_rev_input.setRange(0.001, 1.0)
+        self.auto_step_rev_input.setSingleStep(0.01)
+        self.auto_step_rev_input.setDecimals(3)
+        self.auto_step_rev_input.setValue(0.10)
         self.auto_step_rev_input.setGeometry(40, 75, 120, 35)
 
         QLabel("Number of points", self.automation_tab).setGeometry(
             220, 40, 140, 30
         )
         self.auto_point_count_input = QSpinBox(self.automation_tab)
-        self.auto_point_count_input.setRange(
-            AUTO_POINT_COUNT_MIN, AUTO_POINT_COUNT_MAX
-        )
-        self.auto_point_count_input.setValue(AUTO_POINT_COUNT_DEFAULT)
+        self.auto_point_count_input.setRange(1, 1000)
+        self.auto_point_count_input.setValue(10)
         self.auto_point_count_input.setGeometry(220, 75, 120, 35)
 
         QLabel("Stop time per point (s)", self.automation_tab).setGeometry(
             40, 125, 180, 30
         )
         self.auto_pause_input = QDoubleSpinBox(self.automation_tab)
-        self.auto_pause_input.setRange(AUTO_PAUSE_MIN_S, AUTO_PAUSE_MAX_S)
-        self.auto_pause_input.setSingleStep(AUTO_PAUSE_STEP_S)
-        self.auto_pause_input.setDecimals(AUTO_PAUSE_DECIMALS)
-        self.auto_pause_input.setValue(AUTO_PAUSE_DEFAULT_S)
+        self.auto_pause_input.setRange(0.0, 3600.0)
+        self.auto_pause_input.setSingleStep(0.5)
+        self.auto_pause_input.setDecimals(1)
+        self.auto_pause_input.setValue(2.0)
         self.auto_pause_input.setGeometry(40, 160, 120, 35)
 
         QLabel("Direction", self.automation_tab).setGeometry(220, 125, 100, 30)
@@ -698,12 +580,10 @@ class MainWindow(QMainWindow):
         )
         self.closed_loop_target_input = QDoubleSpinBox(self.closed_loop_tab)
         self.closed_loop_target_input.setGeometry(40, 140, 140, 35)
-        self.closed_loop_target_input.setRange(
-            CLOSED_LOOP_TARGET_MIN_MNM, CLOSED_LOOP_TARGET_MAX_MNM
-        )
-        self.closed_loop_target_input.setDecimals(CLOSED_LOOP_TARGET_DECIMALS)
-        self.closed_loop_target_input.setSingleStep(CLOSED_LOOP_TARGET_STEP_MNM)
-        self.closed_loop_target_input.setValue(CLOSED_LOOP_TARGET_DEFAULT_MNM)
+        self.closed_loop_target_input.setRange(-1_000_000.0, 1_000_000.0)
+        self.closed_loop_target_input.setDecimals(2)
+        self.closed_loop_target_input.setSingleStep(100.0)
+        self.closed_loop_target_input.setValue(0.0)
         self.closed_loop_target_input.editingFinished.connect(
             self.validate_closed_loop_reference
         )
@@ -744,19 +624,10 @@ class MainWindow(QMainWindow):
             self.closed_loop_automation_tab
         )
         self.closed_loop_automation_bound_input.setGeometry(40, 140, 140, 35)
-        self.closed_loop_automation_bound_input.setRange(
-            CLOSED_LOOP_AUTOMATION_BOUND_MIN_MNM,
-            CLOSED_LOOP_AUTOMATION_BOUND_MAX_MNM,
-        )
-        self.closed_loop_automation_bound_input.setDecimals(
-            CLOSED_LOOP_AUTOMATION_BOUND_DECIMALS
-        )
-        self.closed_loop_automation_bound_input.setSingleStep(
-            CLOSED_LOOP_AUTOMATION_BOUND_STEP_MNM
-        )
-        self.closed_loop_automation_bound_input.setValue(
-            CLOSED_LOOP_AUTOMATION_BOUND_DEFAULT_MNM
-        )
+        self.closed_loop_automation_bound_input.setRange(0.1, 1_000_000.0)
+        self.closed_loop_automation_bound_input.setDecimals(2)
+        self.closed_loop_automation_bound_input.setSingleStep(100.0)
+        self.closed_loop_automation_bound_input.setValue(1000.0)
 
         QLabel("Torque Points", self.closed_loop_automation_tab).setGeometry(
             220, 105, 140, 30
@@ -765,13 +636,8 @@ class MainWindow(QMainWindow):
             self.closed_loop_automation_tab
         )
         self.closed_loop_automation_points_input.setGeometry(220, 140, 120, 35)
-        self.closed_loop_automation_points_input.setRange(
-            CLOSED_LOOP_AUTOMATION_POINT_COUNT_MIN,
-            CLOSED_LOOP_AUTOMATION_POINT_COUNT_MAX,
-        )
-        self.closed_loop_automation_points_input.setValue(
-            CLOSED_LOOP_AUTOMATION_POINT_COUNT_DEFAULT
-        )
+        self.closed_loop_automation_points_input.setRange(1, 1000)
+        self.closed_loop_automation_points_input.setValue(10)
 
         QLabel(
             "Hold Time After Settling (s)", self.closed_loop_automation_tab
@@ -780,19 +646,10 @@ class MainWindow(QMainWindow):
             self.closed_loop_automation_tab
         )
         self.closed_loop_automation_pause_input.setGeometry(40, 230, 140, 35)
-        self.closed_loop_automation_pause_input.setRange(
-            CLOSED_LOOP_AUTOMATION_PAUSE_MIN_S,
-            CLOSED_LOOP_AUTOMATION_PAUSE_MAX_S,
-        )
-        self.closed_loop_automation_pause_input.setDecimals(
-            CLOSED_LOOP_AUTOMATION_PAUSE_DECIMALS
-        )
-        self.closed_loop_automation_pause_input.setSingleStep(
-            CLOSED_LOOP_AUTOMATION_PAUSE_STEP_S
-        )
-        self.closed_loop_automation_pause_input.setValue(
-            CLOSED_LOOP_AUTOMATION_PAUSE_DEFAULT_S
-        )
+        self.closed_loop_automation_pause_input.setRange(0.0, 3600.0)
+        self.closed_loop_automation_pause_input.setDecimals(1)
+        self.closed_loop_automation_pause_input.setSingleStep(0.5)
+        self.closed_loop_automation_pause_input.setValue(2.0)
 
         QLabel("Direction", self.closed_loop_automation_tab).setGeometry(
             220, 195, 120, 30
@@ -886,7 +743,7 @@ class MainWindow(QMainWindow):
 
     def _init_torque_sensor(self):
         if VoltageRatioInput is None:
-            self.sensor_state_label.setText("State: Waiting for torque sensor")
+            self.sensor_state_label.setText("State: Simulated")
             return
 
         try:
@@ -894,19 +751,20 @@ class MainWindow(QMainWindow):
             self.bridge.setChannel(TORQUE_CHANNEL)
             self.bridge.setOnAttachHandler(self.on_sensor_attach)
             self.bridge.setOnVoltageRatioChangeHandler(self.on_voltage_ratio_change)
-            self.bridge.openWaitForAttachment(TORQUE_SENSOR_ATTACH_TIMEOUT_MS)
+            self.bridge.openWaitForAttachment(5000)
             self.bridge.setDataRate(DATA_RATE)
             self.sensor_state_label.setText("State: Waiting for tare")
         except Exception:
             self.bridge = None
-            self.sensor_state_label.setText("State: Waiting for torque sensor")
-            self.latest_voltage_ratio = math.nan
-            self.latest_force = math.nan
+            self.sensor_state_label.setText("State: Simulated")
+            self.latest_voltage_ratio = 0.0
+            self.latest_force = 0.0
+            self.last_simulated_plant_update_s = perf_counter()
 
     def _start_sensor_refresh(self):
         self.sensor_timer = QTimer(self)
         self.sensor_timer.timeout.connect(self.refresh_sensor_labels)
-        self.sensor_timer.start(SENSOR_REFRESH_INTERVAL_MS)
+        self.sensor_timer.start(20)
 
     def eventFilter(self, source, event):
         if (
@@ -932,7 +790,7 @@ class MainWindow(QMainWindow):
     def _start_closed_loop_timer(self):
         self.closed_loop_timer = QTimer(self)
         self.closed_loop_timer.timeout.connect(self._process_closed_loop_control)
-        self.closed_loop_timer.start(CLOSED_LOOP_CONTROL_INTERVAL_MS)
+        self.closed_loop_timer.start(PID_CONTROL_INTERVAL_MS)
 
     def on_sensor_attach(self, sensor):
         self.sensor_state_label.setText(
@@ -946,6 +804,9 @@ class MainWindow(QMainWindow):
         self.latest_force = (voltage_ratio - self.tare_offset) * CALIBRATION_FACTOR
 
     def refresh_sensor_labels(self):
+        if self.bridge is None:
+            self._update_simulated_plant()
+
         self.sensor_voltage_label.setText(
             f"Voltage Ratio: {self._format_numeric(self.latest_voltage_ratio, 6)}"
         )
@@ -958,7 +819,9 @@ class MainWindow(QMainWindow):
         self._update_waveforms()
         self.log_data()
 
-        if self.bridge is None or math.isnan(self.latest_voltage_ratio):
+        if self.bridge is None:
+            self.sensor_state_label.setText("State: Simulated")
+        elif math.isnan(self.latest_voltage_ratio):
             self.sensor_state_label.setText("State: Waiting for sensor")
         elif self.tare_offset is None:
             self.sensor_state_label.setText("State: Waiting for tare")
@@ -1070,109 +933,75 @@ class MainWindow(QMainWindow):
         encoder_motion_ticks = self.encoder_filtered - self.encoder_zero_raw
         return (encoder_motion_ticks / ENCODER_COUNTS_PER_REV) * 360.0
 
-    def _reset_closed_loop_state(self):
-        self.previous_torque_mnm = math.nan
-        self.closed_loop_last_update_s = perf_counter()
-        self.closed_loop_mode = "feedforward"
-        self.ff_fraction = FF_INITIAL_FRACTION
-        self._reset_feedforward_chunk_state()
+    def _update_simulated_plant(self):
+        current_time_s = perf_counter()
+        delta_s = current_time_s - self.last_simulated_plant_update_s
+        self.last_simulated_plant_update_s = current_time_s
+        if delta_s <= 0.0:
+            return
+
+        previous_output_angle_rev = self.simulated_output_angle_rev
+        motor_angle_rev = self.step_counter / STEPPER_DRIVER_PULSES_PER_REV
+        self.simulated_output_angle_rev = motor_angle_rev / GEAR_REDUCTION_RATIO
+        output_velocity_rev_s = (
+            self.simulated_output_angle_rev - previous_output_angle_rev
+        ) / delta_s
+
+        # Use a fixed load angle for now, so output angle directly creates spring
+        # deflection and torque through the spring-damper relation.
+        self.simulated_deflection_rev = (
+            self.simulated_output_angle_rev - self.simulated_load_angle_rev
+        )
+        static_torque_mnm = (
+            SIMULATED_SPRING_STIFFNESS_MNM_PER_OUTPUT_REV
+            * self.simulated_deflection_rev
+        )
+        transient_target_mnm = (
+            SIMULATED_SPRING_DAMPING_MNM_PER_OUTPUT_REV_PER_S * output_velocity_rev_s
+        )
+        transient_blend = 1.0 - math.exp(
+            -delta_s / SIMULATED_TRANSIENT_TIME_CONSTANT_S
+        )
+        self.simulated_transient_torque_mnm += (
+            transient_target_mnm - self.simulated_transient_torque_mnm
+        ) * transient_blend
+        torque_mnm = static_torque_mnm + self.simulated_transient_torque_mnm
+        torque_ticks = round(torque_mnm * SIMULATED_TORQUE_TICKS_PER_MNM)
+        quantized_torque_mnm = torque_ticks / SIMULATED_TORQUE_TICKS_PER_MNM
+        self.latest_force = quantized_torque_mnm / DISPLAY_TORQUE_SCALE
+        self.latest_voltage_ratio = self.latest_force / CALIBRATION_FACTOR
+
+    def _calculate_simulated_encoder_ticks(self):
+        encoder_motion_ticks = self.simulated_deflection_rev * ENCODER_COUNTS_PER_REV
+        return SIMULATED_ENCODER_DC_BIAS_TICKS + encoder_motion_ticks
+
+    def _reset_pid_state(self):
+        self.pid_integral = 0.0
+        self.pid_previous_torque_mnm = math.nan
+        self.pid_last_update_s = perf_counter()
+        self.pid_step_accumulator = 0.0
+        self.pid_commanded_rate_hz = 0.0
+        self.pid_hysteresis_active = False
+        self.closed_loop_mode = "approach"
         self.filtered_error_mnm = math.nan
         self.hold_reentry_started_s = None
-        self.hold_started_s = None
         self.trim_last_pulse_s = None
-        self.trim_crossing_started_s = None
         self.trim_last_error_mnm = math.nan
         self.trim_last_abs_error_mnm = math.nan
-        self.trim_last_torque_mnm = math.nan
-        self.trim_gain_mnm_per_pulse = math.nan
         self.trim_bad_step_count = 0
 
-    def _reset_closed_loop_runtime(self):
-        self.previous_torque_mnm = math.nan
-        self.closed_loop_last_update_s = perf_counter()
+    def _reset_pid_capture_state(self):
+        self.pid_integral = 0.0
+        self.pid_previous_torque_mnm = math.nan
+        self.pid_step_accumulator = 0.0
+        self.pid_commanded_rate_hz = 0.0
+        self.pid_hysteresis_active = False
 
     def _reset_trim_state(self):
         self.trim_last_pulse_s = None
-        self.trim_crossing_started_s = None
         self.trim_last_error_mnm = math.nan
         self.trim_last_abs_error_mnm = math.nan
-        self.trim_last_torque_mnm = math.nan
         self.trim_bad_step_count = 0
-
-    def _enter_hold_mode(self, current_time_s):
-        self.closed_loop_mode = "hold"
-        self._reset_closed_loop_runtime()
-        self._reset_trim_state()
-        self.hold_started_s = current_time_s
-        self.hold_reentry_started_s = None
-
-    def _hold_reentry_band_mnm(self):
-        if math.isnan(self.trim_gain_mnm_per_pulse):
-            dynamic_band_mnm = HOLD_REENTRY_MIN_BAND_MNM
-        else:
-            dynamic_band_mnm = (
-                HOLD_REENTRY_GAIN_MULTIPLIER * self.trim_gain_mnm_per_pulse
-            )
-        return min(
-            max(dynamic_band_mnm, HOLD_REENTRY_MIN_BAND_MNM),
-            HOLD_REENTRY_MAX_BAND_MNM,
-        )
-
-    def _update_trim_gain(self, gain_mnm_per_pulse):
-        if gain_mnm_per_pulse < FF_MIN_GAIN_MNM_PER_PULSE:
-            return
-        if math.isnan(self.trim_gain_mnm_per_pulse):
-            self.trim_gain_mnm_per_pulse = gain_mnm_per_pulse
-        else:
-            self.trim_gain_mnm_per_pulse = (
-                (1.0 - TRIM_GAIN_ALPHA) * self.trim_gain_mnm_per_pulse
-                + TRIM_GAIN_ALPHA * gain_mnm_per_pulse
-            )
-
-    def _reset_feedforward_chunk_state(self):
-        self.ff_waiting_for_settle = False
-        self.ff_last_move_s = None
-        self.ff_start_torque_mnm = math.nan
-        self.ff_start_abs_error_mnm = math.nan
-        self.ff_last_direction = None
-        self.ff_last_pulses = 0
-        self.ff_last_predicted_delta_mnm = math.nan
-
-    def _get_feedforward_gain(self, direction):
-        gain = (
-            self.ff_gain_cw_mnm_per_pulse
-            if direction == CW
-            else self.ff_gain_ccw_mnm_per_pulse
-        )
-        if math.isnan(gain) or gain < FF_MIN_GAIN_MNM_PER_PULSE:
-            return FF_DEFAULT_GAIN_MNM_PER_PULSE
-        return gain
-
-    def _update_feedforward_gain(self, direction, gain_mnm_per_pulse):
-        if gain_mnm_per_pulse < FF_MIN_GAIN_MNM_PER_PULSE:
-            return
-        if direction == CW:
-            old_gain = self.ff_gain_cw_mnm_per_pulse
-            self.ff_gain_cw_mnm_per_pulse = (
-                gain_mnm_per_pulse
-                if math.isnan(old_gain)
-                else (1.0 - FF_GAIN_ALPHA) * old_gain
-                + FF_GAIN_ALPHA * gain_mnm_per_pulse
-            )
-        else:
-            old_gain = self.ff_gain_ccw_mnm_per_pulse
-            self.ff_gain_ccw_mnm_per_pulse = (
-                gain_mnm_per_pulse
-                if math.isnan(old_gain)
-                else (1.0 - FF_GAIN_ALPHA) * old_gain
-                + FF_GAIN_ALPHA * gain_mnm_per_pulse
-            )
-
-    def _estimated_feedforward_chunk_pulses(self, error_mnm):
-        direction = CW if error_mnm > 0.0 else CCW
-        gain_mnm_per_pulse = self._get_feedforward_gain(direction)
-        estimated_pulses_to_target = abs(error_mnm) / gain_mnm_per_pulse
-        return estimated_pulses_to_target * self.ff_fraction
 
     def _process_closed_loop_control(self):
         if not self.closed_loop_enabled:
@@ -1191,8 +1020,8 @@ class MainWindow(QMainWindow):
             return
 
         current_time_s = perf_counter()
-        delta_s = current_time_s - self.closed_loop_last_update_s
-        self.closed_loop_last_update_s = current_time_s
+        delta_s = current_time_s - self.pid_last_update_s
+        self.pid_last_update_s = current_time_s
         if delta_s <= 0.0:
             return
 
@@ -1208,24 +1037,16 @@ class MainWindow(QMainWindow):
                 + (1.0 - ERROR_FILTER_ALPHA) * self.filtered_error_mnm
             )
 
-        if math.isnan(self.previous_torque_mnm):
+        if math.isnan(self.pid_previous_torque_mnm):
             torque_derivative_mnm_s = 0.0
         else:
             torque_derivative_mnm_s = (
-                current_torque_mnm - self.previous_torque_mnm
+                current_torque_mnm - self.pid_previous_torque_mnm
             ) / delta_s
-        self.previous_torque_mnm = current_torque_mnm
+        self.pid_previous_torque_mnm = current_torque_mnm
 
         if self.closed_loop_mode == "hold":
-            hold_elapsed_s = (
-                current_time_s - self.hold_started_s
-                if self.hold_started_s is not None
-                else math.inf
-            )
-            hold_band_mnm = self._hold_reentry_band_mnm()
-            if hold_elapsed_s < HOLD_SETTLE_GUARD_S:
-                self.hold_reentry_started_s = None
-            elif abs(self.filtered_error_mnm) > hold_band_mnm:
+            if abs(self.filtered_error_mnm) > HOLD_REENTRY_BAND_MNM:
                 if self.hold_reentry_started_s is None:
                     self.hold_reentry_started_s = current_time_s
                 elif (
@@ -1234,210 +1055,88 @@ class MainWindow(QMainWindow):
                 ):
                     self.closed_loop_mode = (
                         "trim"
-                        if (
-                            abs_error_mnm <= FF_TO_TRIM_BAND_MNM
-                            or self._estimated_feedforward_chunk_pulses(error_mnm)
-                            <= FF_TO_TRIM_CHUNK_PULSES
-                        )
-                        else "feedforward"
+                        if abs_error_mnm <= PID_CAPTURE_BAND_MNM
+                        else "approach"
                     )
-                    self._reset_closed_loop_runtime()
+                    self._reset_pid_capture_state()
                     self._reset_trim_state()
-                    self._reset_feedforward_chunk_state()
                     self.hold_reentry_started_s = None
-                    self.hold_started_s = None
             else:
                 self.hold_reentry_started_s = None
             if self.closed_loop_mode == "hold":
                 self.closed_loop_status_label.setText(
                     "Closed-Loop State: Hold "
                     f"({current_torque_mnm:.1f} mN-m, "
-                    f"filtered error {self.filtered_error_mnm:.1f} mN-m, "
-                    f"band {hold_band_mnm:.1f} mN-m)"
+                    f"filtered error {self.filtered_error_mnm:.1f} mN-m)"
                 )
                 self._process_closed_loop_automation(current_time_s)
                 return
 
-        if self.closed_loop_mode == "feedforward":
-            if (
-                abs_error_mnm <= FF_TO_TRIM_BAND_MNM
-                or self._estimated_feedforward_chunk_pulses(error_mnm)
-                <= FF_TO_TRIM_CHUNK_PULSES
+        if self.closed_loop_mode == "approach":
+            if abs_error_mnm <= PID_CAPTURE_BAND_MNM:
+                self.closed_loop_mode = "capture"
+                self._reset_pid_capture_state()
+        elif self.closed_loop_mode == "capture":
+            if abs_error_mnm <= TRIM_ENABLE_ERROR_MNM and (
+                abs(torque_derivative_mnm_s) <= TRIM_FLAT_TORQUE_RATE_MNM_PER_S
             ):
                 self.closed_loop_mode = "trim"
-                self._reset_closed_loop_runtime()
+                self._reset_pid_capture_state()
                 self._reset_trim_state()
-                self._reset_feedforward_chunk_state()
-        elif (
-            self.closed_loop_mode == "trim"
-            and abs_error_mnm >= TRIM_RELEASE_TO_FF_BAND_MNM
-        ):
-            self.closed_loop_mode = "feedforward"
-            self._reset_closed_loop_runtime()
+            elif abs_error_mnm >= PID_RELEASE_BAND_MNM:
+                self.closed_loop_mode = "approach"
+                self._reset_pid_capture_state()
+                self._reset_trim_state()
+        elif self.closed_loop_mode == "trim" and abs_error_mnm >= PID_RELEASE_BAND_MNM:
+            self.closed_loop_mode = "approach"
+            self._reset_pid_capture_state()
             self._reset_trim_state()
-            self._reset_feedforward_chunk_state()
 
-        if self.closed_loop_mode == "feedforward":
-            if self.ff_waiting_for_settle:
-                if current_time_s - self.ff_last_move_s < FF_SETTLE_TIME_S:
-                    self.closed_loop_status_label.setText(
-                        "Closed-Loop State: Feedforward Settling "
-                        f"({current_torque_mnm:.1f} mN-m, "
-                        f"error {error_mnm:.1f} mN-m)"
-                    )
-                    self._process_closed_loop_automation(current_time_s)
-                    return
-
-                actual_improvement_mnm = self.ff_start_abs_error_mnm - abs_error_mnm
-                if actual_improvement_mnm > FF_MIN_IMPROVEMENT_MNM:
-                    measured_gain = actual_improvement_mnm / max(
-                        self.ff_last_pulses, 1
-                    )
-                    self._update_feedforward_gain(
-                        self.ff_last_direction, measured_gain
-                    )
-                    if (
-                        not math.isnan(self.ff_last_predicted_delta_mnm)
-                        and self.ff_last_predicted_delta_mnm > 0.0
-                    ):
-                        prediction_ratio = (
-                            actual_improvement_mnm
-                            / self.ff_last_predicted_delta_mnm
-                        )
-                        if (
-                            FF_GOOD_PREDICTION_RATIO_MIN
-                            <= prediction_ratio
-                            <= FF_GOOD_PREDICTION_RATIO_MAX
-                        ):
-                            self.ff_fraction = min(
-                                self.ff_fraction + FF_FRACTION_STEP_UP,
-                                FF_MAX_FRACTION,
-                            )
-                        else:
-                            self.ff_fraction = max(
-                                self.ff_fraction - FF_FRACTION_STEP_DOWN,
-                                FF_MIN_FRACTION,
-                            )
-                else:
-                    self.ff_fraction = max(
-                        self.ff_fraction - FF_FRACTION_STEP_DOWN,
-                        FF_MIN_FRACTION,
-                    )
-
-                self._reset_feedforward_chunk_state()
-                if (
-                    abs_error_mnm <= FF_TO_TRIM_BAND_MNM
-                    or self._estimated_feedforward_chunk_pulses(error_mnm)
-                    <= FF_TO_TRIM_CHUNK_PULSES
-                ):
-                    self.closed_loop_mode = "trim"
-                    self._reset_trim_state()
-
-            if self.closed_loop_mode == "feedforward":
-                direction = CW if error_mnm > 0.0 else CCW
-                gain_mnm_per_pulse = self._get_feedforward_gain(direction)
-                estimated_pulses_to_target = abs_error_mnm / gain_mnm_per_pulse
-                if (
-                    (direction == CW and math.isnan(self.ff_gain_cw_mnm_per_pulse))
-                    or (
-                        direction == CCW
-                        and math.isnan(self.ff_gain_ccw_mnm_per_pulse)
-                    )
-                ):
-                    chunk_pulses = FF_PROBE_PULSES
-                else:
-                    chunk_pulses = round(
-                        estimated_pulses_to_target * self.ff_fraction
-                    )
-                    chunk_pulses = max(chunk_pulses, FF_MIN_CHUNK_PULSES)
-                chunk_pulses = min(chunk_pulses, FF_MAX_CHUNK_PULSES)
-
-                direction_text = "CW" if direction == CW else "CCW"
-                self.set_status(f"Stepper State: FF {direction_text}")
-                pulses_sent = self._drive_stepper_pulses(
-                    direction,
-                    chunk_pulses,
-                    FF_PULSE_RATE_HZ,
-                    process_events=False,
-                )
-                if pulses_sent > 0:
-                    self.ff_waiting_for_settle = True
-                    self.ff_last_move_s = current_time_s
-                    self.ff_start_torque_mnm = current_torque_mnm
-                    self.ff_start_abs_error_mnm = abs_error_mnm
-                    self.ff_last_direction = direction
-                    self.ff_last_pulses = pulses_sent
-                    self.ff_last_predicted_delta_mnm = (
-                        gain_mnm_per_pulse * pulses_sent
-                    )
-                self.closed_loop_status_label.setText(
-                    "Closed-Loop State: Feedforward "
-                    f"({current_torque_mnm:.1f} mN-m, "
-                    f"error {error_mnm:.1f} mN-m, "
-                    f"chunk {pulses_sent}/{chunk_pulses}, "
-                    f"fraction {self.ff_fraction:.2f})"
-                )
-                self._process_closed_loop_automation(current_time_s)
-                return
+        if self.closed_loop_mode == "approach":
+            direction_sign = 1.0 if error_mnm > 0.0 else -1.0
+            approach_fraction = min(
+                abs_error_mnm / APPROACH_SLOWDOWN_BAND_MNM, 1.0
+            )
+            approach_rate_hz = APPROACH_MIN_STEP_RATE_HZ + approach_fraction * (
+                APPROACH_MAX_STEP_RATE_HZ - APPROACH_MIN_STEP_RATE_HZ
+            )
+            target_rate_hz = direction_sign * approach_rate_hz
+            self.pid_integral = 0.0
+            self.pid_previous_torque_mnm = math.nan
+            self.pid_hysteresis_active = False
         elif self.closed_loop_mode == "trim":
+            self.pid_integral = 0.0
+            self.pid_step_accumulator = 0.0
+            self.pid_commanded_rate_hz = 0.0
+
             if self.trim_last_pulse_s is None:
-                self.trim_last_pulse_s = current_time_s - TRIM_MAX_SETTLE_TIME_S
+                self.trim_last_pulse_s = current_time_s - TRIM_SETTLE_TIME_S
                 self.trim_last_error_mnm = error_mnm
                 self.trim_last_abs_error_mnm = abs_error_mnm
-                self.trim_last_torque_mnm = current_torque_mnm
 
-            trim_elapsed_s = current_time_s - self.trim_last_pulse_s
-            trim_stable = (
-                trim_elapsed_s >= TRIM_MIN_SETTLE_TIME_S
-                and abs(torque_derivative_mnm_s)
-                <= TRIM_STABLE_TORQUE_RATE_MNM_PER_S
-            )
-            trim_timed_out = trim_elapsed_s >= TRIM_MAX_SETTLE_TIME_S
             if (
                 not math.isnan(self.trim_last_error_mnm)
                 and error_mnm * self.trim_last_error_mnm <= 0.0
             ):
-                if trim_stable or trim_timed_out:
-                    if self.trim_crossing_started_s is None:
-                        self.trim_crossing_started_s = current_time_s
-                    elif (
-                        current_time_s - self.trim_crossing_started_s
-                        >= TRIM_CROSSING_DWELL_S
-                    ):
-                        if not math.isnan(self.trim_last_torque_mnm):
-                            self._update_trim_gain(
-                                abs(current_torque_mnm - self.trim_last_torque_mnm)
-                            )
-                        self._enter_hold_mode(current_time_s)
-                        self.closed_loop_status_label.setText(
-                            "Closed-Loop State: Hold "
-                            f"({current_torque_mnm:.1f} mN-m, crossed reference)"
-                        )
-                        self._process_closed_loop_automation(current_time_s)
-                        return
+                self.closed_loop_mode = "hold"
+                self._reset_pid_capture_state()
+                self._reset_trim_state()
+                self.hold_reentry_started_s = None
                 self.closed_loop_status_label.setText(
-                    "Closed-Loop State: Trim Crossing "
+                    "Closed-Loop State: Hold "
+                    f"({current_torque_mnm:.1f} mN-m, crossed reference)"
+                )
+                self._process_closed_loop_automation(current_time_s)
+                return
+
+            if current_time_s - self.trim_last_pulse_s < TRIM_SETTLE_TIME_S:
+                self.closed_loop_status_label.setText(
+                    "Closed-Loop State: Trim Settling "
                     f"({current_torque_mnm:.1f} mN-m, "
                     f"error {error_mnm:.1f} mN-m)"
                 )
                 self._process_closed_loop_automation(current_time_s)
                 return
-            self.trim_crossing_started_s = None
-
-            if not trim_stable and not trim_timed_out:
-                self.closed_loop_status_label.setText(
-                    "Closed-Loop State: Trim Settling "
-                    f"({current_torque_mnm:.1f} mN-m, "
-                    f"error {error_mnm:.1f} mN-m, "
-                    f"slope {torque_derivative_mnm_s:.1f} mN-m/s)"
-                )
-                self._process_closed_loop_automation(current_time_s)
-                return
-
-            if not math.isnan(self.trim_last_torque_mnm):
-                self._update_trim_gain(
-                    abs(current_torque_mnm - self.trim_last_torque_mnm)
-                )
 
             if (
                 not math.isnan(self.trim_last_abs_error_mnm)
@@ -1449,7 +1148,10 @@ class MainWindow(QMainWindow):
                 self.trim_bad_step_count = 0
 
             if self.trim_bad_step_count >= TRIM_MAX_BAD_STEPS:
-                self._enter_hold_mode(current_time_s)
+                self.closed_loop_mode = "hold"
+                self._reset_pid_capture_state()
+                self._reset_trim_state()
+                self.hold_reentry_started_s = None
                 self.closed_loop_status_label.setText(
                     "Closed-Loop State: Hold "
                     f"({current_torque_mnm:.1f} mN-m, trim stopped)"
@@ -1470,8 +1172,6 @@ class MainWindow(QMainWindow):
                 self.trim_last_pulse_s = current_time_s
                 self.trim_last_error_mnm = error_mnm
                 self.trim_last_abs_error_mnm = abs_error_mnm
-                self.trim_last_torque_mnm = current_torque_mnm
-                self.trim_crossing_started_s = None
             self.closed_loop_status_label.setText(
                 "Closed-Loop State: Trim "
                 f"({current_torque_mnm:.1f} mN-m, "
@@ -1480,13 +1180,72 @@ class MainWindow(QMainWindow):
             self._process_closed_loop_automation(current_time_s)
             return
         else:
-            self.closed_loop_mode = "feedforward"
-            self._reset_feedforward_chunk_state()
-            self.closed_loop_status_label.setText(
-                "Closed-Loop State: Feedforward "
-                f"({current_torque_mnm:.1f} mN-m, "
-                f"error {error_mnm:.1f} mN-m)"
+            if not self.pid_hysteresis_active:
+                if abs(error_mnm) <= PID_HYSTERESIS_REENTRY_MNM:
+                    error_mnm = 0.0
+                else:
+                    self.pid_hysteresis_active = True
+            elif abs(error_mnm) <= PID_ERROR_DEADBAND_MNM:
+                self.pid_hysteresis_active = False
+                error_mnm = 0.0
+
+            self.pid_integral += error_mnm * delta_s
+            if error_mnm == 0.0:
+                self.pid_integral = 0.0
+            self.pid_integral = max(
+                min(self.pid_integral, PID_INTEGRAL_LIMIT), -PID_INTEGRAL_LIMIT
             )
+
+            target_rate_hz = (
+                PID_KP * error_mnm
+                + PID_KI * self.pid_integral
+                - PID_KD * torque_derivative_mnm_s
+            )
+            target_rate_hz = max(
+                min(target_rate_hz, PID_MAX_STEP_RATE_HZ), -PID_MAX_STEP_RATE_HZ
+            )
+        max_rate_delta = PID_MAX_RATE_CHANGE_HZ_PER_S * delta_s
+        rate_delta = target_rate_hz - self.pid_commanded_rate_hz
+        rate_delta = max(min(rate_delta, max_rate_delta), -max_rate_delta)
+        self.pid_commanded_rate_hz += rate_delta
+        commanded_rate_hz = self.pid_commanded_rate_hz
+
+        self.pid_step_accumulator += commanded_rate_hz * delta_s
+        available_pulse_count = int(abs(self.pid_step_accumulator))
+        if available_pulse_count <= 0:
+            self.closed_loop_status_label.setText(
+                "Closed-Loop State: Holding "
+                f"({current_torque_mnm:.1f} mN-m, "
+                f"{self.closed_loop_mode}, "
+                f"error {error_mnm:.1f} mN-m, "
+                f"rate {commanded_rate_hz:.1f} step/s)"
+            )
+            self._process_closed_loop_automation(current_time_s)
+            return
+
+        direction = CW if self.pid_step_accumulator > 0 else CCW
+        pulse_count = min(available_pulse_count, PID_MAX_PULSES_PER_TICK)
+        self.pid_step_accumulator -= math.copysign(
+            pulse_count, self.pid_step_accumulator
+        )
+        direction_text = "CW" if direction == CW else "CCW"
+        self.set_status(f"Stepper State: PID {direction_text}")
+        pulses_sent = self._drive_stepper_pulses(
+            direction,
+            pulse_count,
+            PID_PULSE_OUTPUT_FREQUENCY_HZ,
+            process_events=False,
+        )
+        missed_pulses = pulse_count - pulses_sent
+        if missed_pulses > 0:
+            self.pid_step_accumulator += math.copysign(
+                missed_pulses, commanded_rate_hz
+            )
+        self.closed_loop_status_label.setText(
+            "Closed-Loop State: Active "
+            f"({self.closed_loop_mode}, {current_torque_mnm:.1f} mN-m, "
+            f"error {error_mnm:.1f} mN-m)"
+        )
         self._process_closed_loop_automation(current_time_s)
 
     def _process_closed_loop_automation(self, current_time_s):
@@ -1512,11 +1271,10 @@ class MainWindow(QMainWindow):
         ]
         current_torque_mnm = self.latest_force * DISPLAY_TORQUE_SCALE
         error_mnm = target_value - current_torque_mnm
-        hold_band_mnm = self._hold_reentry_band_mnm()
         is_settled = (
             not math.isnan(current_torque_mnm)
-            and self.closed_loop_mode == "hold"
-            and abs(self.filtered_error_mnm) <= hold_band_mnm
+            and abs(error_mnm) <= PID_ERROR_DEADBAND_MNM
+            and not self.pid_hysteresis_active
         )
 
         if is_settled:
@@ -1535,10 +1293,7 @@ class MainWindow(QMainWindow):
                     f"settled for {settled_elapsed_s:.1f}/{hold_duration_s:.1f} s"
                 )
             else:
-                status_suffix = (
-                    f"settling ({error_mnm:.1f} mN-m error, "
-                    f"band {hold_band_mnm:.1f} mN-m)"
-                )
+                status_suffix = f"settling ({error_mnm:.1f} mN-m error)"
             self.closed_loop_automation_status_label.setText(
                 "Automation State: "
                 f"Holding point {current_point}/{total_points} at "
@@ -1745,7 +1500,7 @@ class MainWindow(QMainWindow):
         GPIO.output(DIR, direction)
         sleep(DIR_SETUP_DELAY_S)
 
-        pulse_delay_s = 0.5 / max(float(frequency_hz), MIN_STEPPER_FREQUENCY_HZ)
+        pulse_delay_s = 0.5 / max(float(frequency_hz), 1.0)
         pulses_sent = 0
         for _ in range(pulse_count):
             if self.stop_requested or self.torque_limit_tripped:
@@ -1756,7 +1511,7 @@ class MainWindow(QMainWindow):
             sleep(pulse_delay_s)
             self.step_counter += 1 if direction == CW else -1
             pulses_sent += 1
-            if self.step_counter % STEP_COUNTER_LABEL_UPDATE_INTERVAL_STEPS == 0:
+            if self.step_counter % 50 == 0:
                 self._update_step_counter_label()
             if process_events:
                 QApplication.processEvents()
@@ -1768,7 +1523,7 @@ class MainWindow(QMainWindow):
         self.set_status("Stepper State: IDLE")
         remaining = seconds
         while remaining > 0 and not self.stop_requested:
-            delay = min(WAIT_POLL_INTERVAL_S, remaining)
+            delay = min(0.05, remaining)
             sleep(delay)
             remaining -= delay
             QApplication.processEvents()
@@ -1845,7 +1600,7 @@ class MainWindow(QMainWindow):
             self.stop_requested = False
             self.validate_closed_loop_reference()
             self.stop_manual_calibration_move()
-            self._reset_closed_loop_state()
+            self._reset_pid_state()
             self._reset_torque_error_history()
             self.closed_loop_toggle_button.blockSignals(True)
             self.closed_loop_toggle_button.setChecked(True)
@@ -1862,7 +1617,7 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(target_tab_index)
             return
 
-        self._reset_closed_loop_state()
+        self._reset_pid_state()
         self._reset_actuation_torque_history()
         self.closed_loop_toggle_button.blockSignals(True)
         self.closed_loop_toggle_button.setChecked(False)
@@ -2016,6 +1771,14 @@ class MainWindow(QMainWindow):
 
     def reset_step_counter(self):
         self.step_counter = 0
+        self.simulated_output_angle_rev = 0.0
+        self.simulated_load_angle_rev = 0.0
+        self.simulated_deflection_rev = 0.0
+        self.simulated_transient_torque_mnm = 0.0
+        if self.bridge is None:
+            self.latest_force = 0.0
+            self.latest_voltage_ratio = 0.0
+        self.last_simulated_plant_update_s = perf_counter()
         if self.encoder_available and not math.isnan(self.encoder_raw):
             self.encoder_zero_raw = float(self.encoder_raw)
         else:
@@ -2072,9 +1835,9 @@ class MainWindow(QMainWindow):
     def _safe_serial_number(self):
         serial_number = self.serial_number_input.text().strip()
         if not serial_number:
-            serial_number = DEFAULT_SERIAL_NUMBER
+            serial_number = "RoboTuners_Test"
         serial_number = re.sub(r"[^A-Za-z0-9_.-]+", "_", serial_number)
-        return serial_number.strip("._-") or DEFAULT_SERIAL_NUMBER
+        return serial_number.strip("._-") or "RoboTuners_Test"
 
     def _ensure_csv_logger(self):
         if self.csv_writer is not None:
@@ -2104,11 +1867,9 @@ class MainWindow(QMainWindow):
     def log_data(self):
         current_time_s = perf_counter()
         log_rate_hz = (
-            self.data_rate_input.value()
-            if self.meaningful_logging_enabled
-            else CSV_BACKGROUND_LOG_RATE_HZ
+            self.data_rate_input.value() if self.meaningful_logging_enabled else 1.0
         )
-        log_interval_s = 1.0 / max(log_rate_hz, CSV_MIN_LOG_RATE_HZ)
+        log_interval_s = 1.0 / max(log_rate_hz, 0.1)
         if current_time_s - self.last_log_time_s < log_interval_s:
             return
 
@@ -2137,7 +1898,7 @@ class MainWindow(QMainWindow):
             ]
         )
         self.last_log_time_s = current_time_s
-        if current_time_s - self.last_csv_flush_s >= CSV_FLUSH_INTERVAL_S:
+        if current_time_s - self.last_csv_flush_s >= 1.0:
             self.csv_file.flush()
             self.last_csv_flush_s = current_time_s
 
