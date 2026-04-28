@@ -1,0 +1,16 @@
+time_s,serial_number,meaningful_logging,voltage_ratio,torque_mnm,torque_abs_mnm,encoder_raw,encoder_filtered,encoder_angle_deg,step_counter,closed_loop_enabled,closed_loop_target_mnm
+1.028495,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+2.054038,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+3.079026,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+4.105514,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+5.129416,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+6.168292,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+7.171846,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+8.179085,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+9.203400,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+10.212065,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+11.235339,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+12.275099,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+13.302969,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+14.329350,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+15.347208,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan

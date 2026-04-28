@@ -188,7 +188,7 @@ ENCODER_COUNTS_PER_REV = ENCODER_DATA_MASK + 1
 # UI and logging configuration.
 APP_TITLE = "Senior Design"
 APP_WINDOW_WIDTH = 1000
-APP_WINDOW_HEIGHT = 600
+APP_WINDOW_HEIGHT = 780
 SIDE_PANEL_WIDTH = 240
 INPUT_WIDTH = 120
 PRIMARY_BUTTON_HEIGHT = 40
@@ -259,6 +259,46 @@ CLOSED_LOOP_AUTOMATION_PAUSE_MAX_S = 3600.0
 CLOSED_LOOP_AUTOMATION_PAUSE_STEP_S = 0.5
 CLOSED_LOOP_AUTOMATION_PAUSE_DECIMALS = 1
 CLOSED_LOOP_AUTOMATION_PAUSE_DEFAULT_S = 2.0
+
+# Zero-torque confirmation sweep (open-loop stiction probe).
+# With the spring engaged but unloaded, the disengagement-side leg sits in
+# stiction (flat torque) while the engagement-side leg starts winding the
+# spring (torque rises). With a loaded spring, both legs see torque change
+# (one direction loads further, the other unloads through the rest position).
+# So: at least one leg flat -> Unloaded; both legs moving -> Loaded.
+ZERO_TORQUE_PROBE_PULSES_MIN = 1
+ZERO_TORQUE_PROBE_PULSES_MAX = 10000
+ZERO_TORQUE_PROBE_PULSES_DEFAULT = 10
+ZERO_TORQUE_DEADBAND_MIN_MNM = 0.1
+ZERO_TORQUE_DEADBAND_MAX_MNM = 10000.0
+ZERO_TORQUE_DEADBAND_STEP_MNM = 1.0
+ZERO_TORQUE_DEADBAND_DECIMALS = 2
+ZERO_TORQUE_DEADBAND_DEFAULT_MNM = 20.0
+ZERO_TORQUE_PROBE_FREQUENCY_HZ = 100.0
+ZERO_TORQUE_SETTLE_S = 0.5
+ZERO_TORQUE_ROLLING_WINDOW = 5
+
+SPRING_LOAD_STATE_UNKNOWN = "Unknown"
+SPRING_LOAD_STATE_UNLOADED = "Unloaded"
+SPRING_LOAD_STATE_LOADED = "Loaded"
+SPRING_LOAD_STATE_ENGAGED = "Engaged"
+
+# Engage routine: starts from confirmed Unloaded, slowly winds the spring in
+# the chosen direction, watches for the rolling-avg torque to climb past
+# `engagement_threshold` mN-m above the starting reading, then back-spins a
+# fixed number of pulses to land at the engagement edge (gear teeth touching,
+# ~zero spring deflection). Result is a reproducible mechanical zero.
+ENGAGE_THRESHOLD_MIN_MNM = 1.0
+ENGAGE_THRESHOLD_MAX_MNM = 10000.0
+ENGAGE_THRESHOLD_STEP_MNM = 5.0
+ENGAGE_THRESHOLD_DECIMALS = 2
+ENGAGE_THRESHOLD_DEFAULT_MNM = 30.0
+ENGAGE_BACKOFF_PULSES_MIN = 0
+ENGAGE_BACKOFF_PULSES_MAX = 10000
+ENGAGE_BACKOFF_PULSES_DEFAULT = 3
+ENGAGE_PROBE_FREQUENCY_HZ = 50.0
+ENGAGE_MAX_PULSES = 3200  # safety cap (~half motor rev at the current scale)
+ENGAGE_ROLLING_WINDOW = 3
 
 
 class WaveformWidget(QWidget):
@@ -410,6 +450,7 @@ class MainWindow(QMainWindow):
         self.closed_loop_automation_point_index = -1
         self.closed_loop_automation_hold_started_s = None
         self.closed_loop_automation_settled_started_s = None
+        self.spring_load_state = SPRING_LOAD_STATE_UNKNOWN
         self.meaningful_logging_enabled = False
         self.start_time_s = perf_counter()
         self.last_log_time_s = self.start_time_s
@@ -684,6 +725,85 @@ class MainWindow(QMainWindow):
         self.automation_start_button.setGeometry(40, 220, 180, 40)
         self.automation_start_button.clicked.connect(self.run_automation)
 
+        QLabel("Zero-Torque Confirmation", self.automation_tab).setGeometry(
+            40, 290, 240, 30
+        )
+
+        QLabel("Probe pulses (each leg)", self.automation_tab).setGeometry(
+            40, 325, 180, 30
+        )
+        self.zero_torque_pulses_input = QSpinBox(self.automation_tab)
+        self.zero_torque_pulses_input.setRange(
+            ZERO_TORQUE_PROBE_PULSES_MIN, ZERO_TORQUE_PROBE_PULSES_MAX
+        )
+        self.zero_torque_pulses_input.setValue(ZERO_TORQUE_PROBE_PULSES_DEFAULT)
+        self.zero_torque_pulses_input.setGeometry(40, 360, 120, 35)
+
+        QLabel("Deadband threshold (mN-m)", self.automation_tab).setGeometry(
+            220, 325, 200, 30
+        )
+        self.zero_torque_deadband_input = QDoubleSpinBox(self.automation_tab)
+        self.zero_torque_deadband_input.setRange(
+            ZERO_TORQUE_DEADBAND_MIN_MNM, ZERO_TORQUE_DEADBAND_MAX_MNM
+        )
+        self.zero_torque_deadband_input.setSingleStep(ZERO_TORQUE_DEADBAND_STEP_MNM)
+        self.zero_torque_deadband_input.setDecimals(ZERO_TORQUE_DEADBAND_DECIMALS)
+        self.zero_torque_deadband_input.setValue(ZERO_TORQUE_DEADBAND_DEFAULT_MNM)
+        self.zero_torque_deadband_input.setGeometry(220, 360, 140, 35)
+
+        self.zero_torque_check_button = QPushButton(
+            "Confirm Zero Torque", self.automation_tab
+        )
+        self.zero_torque_check_button.setGeometry(40, 410, 220, 40)
+        self.zero_torque_check_button.clicked.connect(
+            self.run_zero_torque_confirmation
+        )
+
+        self.zero_torque_status_label = QLabel(
+            "Zero-Torque: not yet checked", self.automation_tab
+        )
+        self.zero_torque_status_label.setGeometry(40, 460, 420, 24)
+
+        QLabel("Engage Spring", self.automation_tab).setGeometry(
+            40, 500, 240, 30
+        )
+
+        QLabel("Direction", self.automation_tab).setGeometry(40, 535, 120, 30)
+        self.engage_direction_input = QComboBox(self.automation_tab)
+        self.engage_direction_input.addItems(["CW", "CCW"])
+        self.engage_direction_input.setGeometry(40, 570, 120, 35)
+
+        QLabel("Engagement threshold (mN-m)", self.automation_tab).setGeometry(
+            220, 535, 220, 30
+        )
+        self.engage_threshold_input = QDoubleSpinBox(self.automation_tab)
+        self.engage_threshold_input.setRange(
+            ENGAGE_THRESHOLD_MIN_MNM, ENGAGE_THRESHOLD_MAX_MNM
+        )
+        self.engage_threshold_input.setSingleStep(ENGAGE_THRESHOLD_STEP_MNM)
+        self.engage_threshold_input.setDecimals(ENGAGE_THRESHOLD_DECIMALS)
+        self.engage_threshold_input.setValue(ENGAGE_THRESHOLD_DEFAULT_MNM)
+        self.engage_threshold_input.setGeometry(220, 570, 140, 35)
+
+        QLabel("Back-off pulses", self.automation_tab).setGeometry(
+            40, 615, 160, 30
+        )
+        self.engage_backoff_input = QSpinBox(self.automation_tab)
+        self.engage_backoff_input.setRange(
+            ENGAGE_BACKOFF_PULSES_MIN, ENGAGE_BACKOFF_PULSES_MAX
+        )
+        self.engage_backoff_input.setValue(ENGAGE_BACKOFF_PULSES_DEFAULT)
+        self.engage_backoff_input.setGeometry(40, 650, 120, 35)
+
+        self.engage_button = QPushButton("Engage Spring", self.automation_tab)
+        self.engage_button.setGeometry(220, 650, 220, 40)
+        self.engage_button.clicked.connect(self.engage_spring)
+
+        self.engage_status_label = QLabel(
+            "Engage: requires confirmed Unloaded state", self.automation_tab
+        )
+        self.engage_status_label.setGeometry(40, 705, 480, 24)
+
     def _build_closed_loop_tab(self):
         QLabel("Closed-Loop Torque Control", self.closed_loop_tab).setGeometry(
             40, 30, 240, 30
@@ -852,6 +972,12 @@ class MainWindow(QMainWindow):
 
         self.encoder_angle_label = QLabel("Angular Displacement: nan deg")
         layout.addWidget(self.encoder_angle_label)
+
+        layout.addSpacing(8)
+        self.spring_load_state_label = QLabel(
+            f"Spring Load: {SPRING_LOAD_STATE_UNKNOWN}"
+        )
+        layout.addWidget(self.spring_load_state_label)
 
         self.torque_plot = WaveformWidget("Torque Waveform", "#c1121f")
         layout.addWidget(self.torque_plot)
@@ -1668,6 +1794,250 @@ class MainWindow(QMainWindow):
                 self.set_status("Stepper State: IDLE")
             self._set_motion_controls_enabled(True)
 
+    def run_zero_torque_confirmation(self):
+        if not self.emergency_stop_enabled:
+            self.set_status("Stepper State: DISABLED (E-Break: F)")
+            return
+
+        if not self._torque_feedback_ready():
+            self._set_spring_load_state(SPRING_LOAD_STATE_UNKNOWN)
+            self.zero_torque_status_label.setText(
+                "Zero-Torque: torque sensor not live"
+            )
+            return
+
+        pulse_count = self.zero_torque_pulses_input.value()
+        deadband_mnm = self.zero_torque_deadband_input.value()
+
+        self.stop_requested = False
+        self._set_motion_controls_enabled(False)
+        cw_delta_mnm = math.nan
+        ccw_delta_mnm = math.nan
+        try:
+            self.set_status("Stepper State: ZERO-TORQUE PROBE CW")
+            cw_delta_mnm = self._zero_torque_probe_leg(CW, pulse_count)
+            if self._zero_torque_aborted():
+                return
+            self._zero_torque_settle()
+            if self._zero_torque_aborted():
+                return
+
+            self.set_status("Stepper State: ZERO-TORQUE RETURN CCW")
+            self._drive_stepper_pulses(
+                CCW, pulse_count, ZERO_TORQUE_PROBE_FREQUENCY_HZ
+            )
+            if self._zero_torque_aborted():
+                return
+            self._zero_torque_settle()
+            if self._zero_torque_aborted():
+                return
+
+            self.set_status("Stepper State: ZERO-TORQUE PROBE CCW")
+            ccw_delta_mnm = self._zero_torque_probe_leg(CCW, pulse_count)
+            if self._zero_torque_aborted():
+                return
+            self._zero_torque_settle()
+            if self._zero_torque_aborted():
+                return
+
+            self.set_status("Stepper State: ZERO-TORQUE RETURN CW")
+            self._drive_stepper_pulses(
+                CW, pulse_count, ZERO_TORQUE_PROBE_FREQUENCY_HZ
+            )
+            if self._zero_torque_aborted():
+                return
+
+            cw_flat = (
+                not math.isnan(cw_delta_mnm) and cw_delta_mnm <= deadband_mnm
+            )
+            ccw_flat = (
+                not math.isnan(ccw_delta_mnm) and ccw_delta_mnm <= deadband_mnm
+            )
+            if math.isnan(cw_delta_mnm) or math.isnan(ccw_delta_mnm):
+                self._set_spring_load_state(SPRING_LOAD_STATE_UNKNOWN)
+                self.zero_torque_status_label.setText(
+                    "Zero-Torque: insufficient samples — check sensor"
+                )
+                return
+
+            new_state = (
+                SPRING_LOAD_STATE_UNLOADED
+                if (cw_flat or ccw_flat)
+                else SPRING_LOAD_STATE_LOADED
+            )
+            self._set_spring_load_state(new_state)
+            self.zero_torque_status_label.setText(
+                f"Zero-Torque: {new_state} "
+                f"(CW Δ {cw_delta_mnm:.2f}, CCW Δ {ccw_delta_mnm:.2f} mN-m, "
+                f"thr {deadband_mnm:.2f})"
+            )
+        finally:
+            if not self.torque_limit_tripped and not self.stop_requested:
+                self.set_status("Stepper State: IDLE")
+            self._set_motion_controls_enabled(True)
+
+    def _zero_torque_aborted(self):
+        return self.stop_requested or self.torque_limit_tripped
+
+    def _zero_torque_probe_leg(self, direction, pulse_count):
+        rolling = deque(maxlen=ZERO_TORQUE_ROLLING_WINDOW)
+        rolling_min = math.nan
+        rolling_max = math.nan
+
+        seed = self.latest_force * DISPLAY_TORQUE_SCALE
+        if not math.isnan(seed):
+            rolling.append(seed)
+            rolling_min = seed
+            rolling_max = seed
+
+        GPIO.output(DIR, direction)
+        sleep(DIR_SETUP_DELAY_S)
+        pulse_delay_s = 0.5 / max(
+            ZERO_TORQUE_PROBE_FREQUENCY_HZ, MIN_STEPPER_FREQUENCY_HZ
+        )
+        for _ in range(pulse_count):
+            if self._zero_torque_aborted():
+                break
+            GPIO.output(STEP, GPIO.HIGH)
+            sleep(pulse_delay_s)
+            GPIO.output(STEP, GPIO.LOW)
+            sleep(pulse_delay_s)
+            self.step_counter += 1 if direction == CW else -1
+            if self.step_counter % STEP_COUNTER_LABEL_UPDATE_INTERVAL_STEPS == 0:
+                self._update_step_counter_label()
+            QApplication.processEvents()
+
+            sample = self.latest_force * DISPLAY_TORQUE_SCALE
+            if math.isnan(sample):
+                continue
+            rolling.append(sample)
+            rolling_avg = sum(rolling) / len(rolling)
+            if math.isnan(rolling_min):
+                rolling_min = rolling_avg
+                rolling_max = rolling_avg
+            else:
+                rolling_min = min(rolling_min, rolling_avg)
+                rolling_max = max(rolling_max, rolling_avg)
+        self._update_step_counter_label()
+
+        if math.isnan(rolling_min) or math.isnan(rolling_max):
+            return math.nan
+        return rolling_max - rolling_min
+
+    def _zero_torque_settle(self):
+        end_s = perf_counter() + ZERO_TORQUE_SETTLE_S
+        while perf_counter() < end_s and not self._zero_torque_aborted():
+            sleep(WAIT_POLL_INTERVAL_S)
+            QApplication.processEvents()
+
+    def _set_spring_load_state(self, state, suffix=""):
+        self.spring_load_state = state
+        label = f"Spring Load: {state}"
+        if suffix:
+            label += f" {suffix}"
+        self.spring_load_state_label.setText(label)
+
+    def engage_spring(self):
+        if not self.emergency_stop_enabled:
+            self.set_status("Stepper State: DISABLED (E-Break: F)")
+            return
+
+        if not self._torque_feedback_ready():
+            self.engage_status_label.setText("Engage: torque sensor not live")
+            return
+
+        if self.spring_load_state != SPRING_LOAD_STATE_UNLOADED:
+            self.engage_status_label.setText(
+                "Engage: requires confirmed Unloaded state — "
+                "run Zero-Torque Confirmation first"
+            )
+            return
+
+        direction_text = self.engage_direction_input.currentText()
+        direction = CW if direction_text == "CW" else CCW
+        threshold_mnm = self.engage_threshold_input.value()
+        backoff_pulses = self.engage_backoff_input.value()
+
+        self.stop_requested = False
+        self._set_motion_controls_enabled(False)
+        try:
+            self.set_status(f"Stepper State: ENGAGING {direction_text}")
+
+            seed = self.latest_force * DISPLAY_TORQUE_SCALE
+            if math.isnan(seed):
+                self.engage_status_label.setText(
+                    "Engage: torque reading is nan — check sensor"
+                )
+                return
+
+            rolling = deque([seed], maxlen=ENGAGE_ROLLING_WINDOW)
+            start_torque_mnm = seed
+            engagement_detected = False
+            pulses_sent = 0
+            last_rolling_avg = seed
+
+            GPIO.output(DIR, direction)
+            sleep(DIR_SETUP_DELAY_S)
+            pulse_delay_s = 0.5 / max(
+                ENGAGE_PROBE_FREQUENCY_HZ, MIN_STEPPER_FREQUENCY_HZ
+            )
+            for _ in range(ENGAGE_MAX_PULSES):
+                if self._zero_torque_aborted():
+                    break
+                GPIO.output(STEP, GPIO.HIGH)
+                sleep(pulse_delay_s)
+                GPIO.output(STEP, GPIO.LOW)
+                sleep(pulse_delay_s)
+                self.step_counter += 1 if direction == CW else -1
+                pulses_sent += 1
+                if self.step_counter % STEP_COUNTER_LABEL_UPDATE_INTERVAL_STEPS == 0:
+                    self._update_step_counter_label()
+                QApplication.processEvents()
+
+                sample = self.latest_force * DISPLAY_TORQUE_SCALE
+                if math.isnan(sample):
+                    continue
+                rolling.append(sample)
+                last_rolling_avg = sum(rolling) / len(rolling)
+                if abs(last_rolling_avg - start_torque_mnm) >= threshold_mnm:
+                    engagement_detected = True
+                    break
+            self._update_step_counter_label()
+
+            if self._zero_torque_aborted():
+                return
+
+            if not engagement_detected:
+                self.engage_status_label.setText(
+                    f"Engage: no torque jump after {pulses_sent} pulses "
+                    f"(Δ {last_rolling_avg - start_torque_mnm:.2f} mN-m, "
+                    f"thr {threshold_mnm:.2f}). "
+                    f"Increase threshold or check engagement direction."
+                )
+                return
+
+            opposite = CCW if direction == CW else CW
+            if backoff_pulses > 0:
+                self.set_status("Stepper State: ENGAGE BACK-OFF")
+                self._drive_stepper_pulses(
+                    opposite, backoff_pulses, ENGAGE_PROBE_FREQUENCY_HZ
+                )
+            if self._zero_torque_aborted():
+                return
+
+            self._set_spring_load_state(
+                SPRING_LOAD_STATE_ENGAGED, f"({direction_text})"
+            )
+            self.engage_status_label.setText(
+                f"Engage: {direction_text} engaged at "
+                f"{pulses_sent} pulses (Δ {last_rolling_avg - start_torque_mnm:.2f} mN-m), "
+                f"backed off {backoff_pulses}."
+            )
+        finally:
+            if not self.torque_limit_tripped and not self.stop_requested:
+                self.set_status("Stepper State: IDLE")
+            self._set_motion_controls_enabled(True)
+
     def start_closed_loop_automation(self):
         if not self.emergency_stop_enabled:
             self.set_status("Stepper State: DISABLED (E-Break: F)")
@@ -1804,6 +2174,13 @@ class MainWindow(QMainWindow):
             self.closed_loop_automation_pause_input,
             self.closed_loop_automation_direction_input,
             self.closed_loop_automation_start_button,
+            self.zero_torque_pulses_input,
+            self.zero_torque_deadband_input,
+            self.zero_torque_check_button,
+            self.engage_direction_input,
+            self.engage_threshold_input,
+            self.engage_backoff_input,
+            self.engage_button,
         ):
             widget.setEnabled(enabled)
 

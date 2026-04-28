@@ -1,0 +1,4 @@
+time_s,serial_number,meaningful_logging,voltage_ratio,torque_mnm,torque_abs_mnm,encoder_raw,encoder_filtered,encoder_angle_deg,step_counter,closed_loop_enabled,closed_loop_target_mnm
+1.001953,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+2.001976,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan
+3.018460,RoboTuners_Test,0,nan,nan,nan,0,0.0,0.0,0,0,nan

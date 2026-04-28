@@ -1,0 +1,3 @@
+timestamp,elapsed_s,event,serial_number,step_counter,encoder_raw,encoder_filtered
+2026-04-28T09:13:46,15.984163,gui_closed,RoboTuners_Test,0,0,0.0
+2026-04-28T09:13:55,3.157630,gui_closed,RoboTuners_Test,0,0,0.0
